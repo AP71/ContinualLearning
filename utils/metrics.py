@@ -1,11 +1,5 @@
-"""
-Calculate Backward Transfer (BWT) metrics for continual learning evaluation.
-"""
-
 from pathlib import Path
-
 import matplotlib.pyplot as plt
-
 
 def calculate_bwt(R):
     T = len(R)
@@ -15,7 +9,6 @@ def calculate_bwt(R):
     for i in range(T - 1):
         bwt_sum += (R[T - 1][i] - R[i][i])
     return bwt_sum / (T - 1)
-
 
 def plot_accuracy_history(accuracy_history, output_path):
     """Plot one accuracy curve for every task over global training epochs."""

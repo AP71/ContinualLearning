@@ -53,7 +53,6 @@ def set_seed() -> None:
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
-
 def create_transforms() -> tuple[transforms.Compose, transforms.Compose]:
     train_transform = transforms.Compose(
         [
@@ -72,7 +71,6 @@ def create_transforms() -> tuple[transforms.Compose, transforms.Compose]:
     )
     return train_transform, test_transform
 
-
 def create_datasets() -> tuple[SplitCIFAR100, SplitCIFAR100]:
     train_transform, test_transform = create_transforms()
     train_data = datasets.CIFAR100(
@@ -83,7 +81,6 @@ def create_datasets() -> tuple[SplitCIFAR100, SplitCIFAR100]:
     )
     LOGGER.info("Loaded CIFAR-100 from %s without downloading.", DATASET_PATH)
     return SplitCIFAR100(train_data), SplitCIFAR100(test_data)
-
 
 def create_model() -> nn.Module:
     if MODEL_NAME == "resneta":
@@ -108,12 +105,7 @@ def create_model() -> nn.Module:
     LOGGER.info("Loaded %s checkpoint from %s.", MODEL_NAME, checkpoint)
     return model.to(DEVICE)
 
-
-def create_loader(
-    dataset: SplitCIFAR100,
-    shuffle: bool,
-    num_workers: int = WORKERS,
-) -> DataLoader:
+def create_loader(dataset: SplitCIFAR100, shuffle: bool, num_workers: int = WORKERS) -> DataLoader:
     loader_options = {
         "batch_size": BATCH_SIZE,
         "shuffle": shuffle,
@@ -127,7 +119,6 @@ def create_loader(
         dataset,
         **loader_options,
     )
-
 
 def evaluate_task(model: nn.Module, loader: DataLoader, task_id: int) -> float:
     started_at = time.perf_counter()
@@ -154,7 +145,6 @@ def evaluate_task(model: nn.Module, loader: DataLoader, task_id: int) -> float:
         time.perf_counter() - started_at,
     )
     return accuracy
-
 
 def train_epoch(model: nn.Module, loader: DataLoader, criterion: nn.Module, optimizer: torch.optim.Optimizer, task_id: int, epoch: int) -> float:
     started_at = time.perf_counter()
@@ -203,12 +193,7 @@ def train_epoch(model: nn.Module, loader: DataLoader, criterion: nn.Module, opti
     )
     return average_loss
 
-
-def evaluate_all_tasks(
-    model: nn.Module,
-    test_loaders: list[DataLoader],
-    accuracy_history: list[list[float]],
-) -> None:
+def evaluate_all_tasks(model: nn.Module, test_loaders: list[DataLoader], accuracy_history: list[list[float]]) -> None:
     started_at = time.perf_counter()
     LOGGER.info(
         "Evaluation of all tasks started after global epoch %d.",
@@ -229,21 +214,13 @@ def evaluate_all_tasks(
         time.perf_counter() - started_at,
     )
 
-
 def copy_model_state(model: nn.Module) -> dict[str, torch.Tensor]:
     return {
         name: tensor.detach().cpu().clone()
         for name, tensor in model.state_dict().items()
     }
 
-
-def create_task_row(
-    task_id: int,
-    train_tasks: SplitCIFAR100,
-    accuracy_matrix: list[list[float | None]],
-    loss_value: float,
-    bit_flip_result: dict,
-) -> dict:
+def create_task_row(task_id: int, train_tasks: SplitCIFAR100, accuracy_matrix: list[list[float | None]], loss_value: float, bit_flip_result: dict) -> dict:
     bwt = calculate_bwt(accuracy_matrix[: task_id + 1])
     binary_summary = bit_flip_result["binary_summary"]
     row = {
@@ -270,7 +247,6 @@ def create_task_row(
     )
     return row
 
-
 def save_results(output_dir: Path, results: dict, task_rows: list[dict]) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "results.json").write_text(
@@ -295,9 +271,9 @@ def save_results(output_dir: Path, results: dict, task_rows: list[dict]) -> None
         "Binary bit flips per task",
         output_dir / "bitflips_per_task.png",
         point_labels=[row["bit_flip_percentage"] for row in task_rows],
+        label_format="{:.4f}%",
     )
     LOGGER.info("Saved metrics, plots, and logs to %s.", output_dir)
-
 
 def main() -> None:
     logging.basicConfig(
