@@ -4,7 +4,7 @@ from pathlib import Path
 import torch
 
 
-SOURCE = Path(r"../Inference/models/imagenet_reactneta_step2.h5")
+SOURCE = Path(r"../inference/models/imagenet_reactneta_step2.h5")
 DESTINATION = Path(r"./checkpoint_modificato.h5")
 
 FLIP_PERCENTAGE = 0.50

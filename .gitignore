@@ -2,5 +2,5 @@
 *.pth
 *.pth.tar
 Weights/
-Inference/models/
+inference/models/
 .idea/
