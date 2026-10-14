@@ -25,7 +25,10 @@ if str(ROOT) not in sys.path:
 from Network.ReActNet_18_Qaw import ResNet18
 from Network.ReActNet_A_Qaw import Reactnet
 from datasets.split_cifar100 import SplitCIFAR100
-from utils.checkpoint_analysis import compare_checkpoints
+from utils.checkpoint_analysis import (
+    compare_checkpoints,
+    plot_latent_distributions,
+)
 from utils.metrics import calculate_bwt, plot_accuracy_history, plot_task_metric
 
 
@@ -260,10 +263,11 @@ def save_results(output_dir: Path, results: dict, task_rows: list[dict]) -> None
     plot_accuracy_history(results["accuracy_history"], output_dir / "accuracy_per_epoch.png")
     plot_task_metric(
         [row["bwt"] for row in task_rows],
-        "BWT",
+        "BWT (%)",
         "Backward transfer per task",
         output_dir / "bwt_per_task.png",
         connect_points=True,
+        percentage_axis=True,
     )
     plot_task_metric(
         [row["bit_flips"] for row in task_rows],
@@ -308,6 +312,10 @@ def main() -> None:
     accuracy_history = [[] for _ in range(train_tasks.NUM_TASKS)]
     task_rows = []
     previous_state = copy_model_state(model)
+    output_dir = OUTPUT_ROOT / f"cifar100_{MODEL_NAME}_{datetime.now():%Y%m%d_%H%M%S}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    sequence_dir = output_dir / "sequence"
+    sequence_dir.mkdir(parents=True, exist_ok=True)
 
     for task_id in range(train_tasks.NUM_TASKS):
         task_started_at = time.perf_counter()
@@ -387,7 +395,16 @@ def main() -> None:
             time.perf_counter() - task_started_at,
         )
 
-    output_dir = OUTPUT_ROOT / f"cifar100_{MODEL_NAME}_{datetime.now():%Y%m%d_%H%M%S}"
+        plot_latent_distributions(
+            bit_flip_result,
+            sequence_dir / f"task_{task_id + 1:02d}.png",
+        )
+        LOGGER.info(
+            "Saved task %d checkpoint comparison plot to %s.",
+            task_id + 1,
+            sequence_dir,
+        )
+
     save_results(
         output_dir,
         {

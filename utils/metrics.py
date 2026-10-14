@@ -1,5 +1,6 @@
 from pathlib import Path
 import matplotlib.pyplot as plt
+from matplotlib.ticker import PercentFormatter
 
 def calculate_bwt(R):
     T = len(R)
@@ -44,6 +45,7 @@ def plot_task_metric(
     connect_points=False,
     point_labels=None,
     label_format="{:.2f}%",
+    percentage_axis=False,
 ):
     """Plot a task-level metric with optional connecting lines and labels."""
     figure, axis = plt.subplots(figsize=(8, 5))
@@ -64,6 +66,8 @@ def plot_task_metric(
     axis.set_xlabel("Task")
     axis.set_ylabel(ylabel)
     axis.set_title(title)
+    if percentage_axis:
+        axis.yaxis.set_major_formatter(PercentFormatter(xmax=1.0))
     axis.set_xticks(task_ids)
     axis.grid(True, alpha=0.3)
     figure.tight_layout()

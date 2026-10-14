@@ -2,6 +2,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any, Callable, Mapping
+
+import matplotlib.pyplot as plt
 import torch
 
 TensorMap = Mapping[str, torch.Tensor]
@@ -34,9 +36,23 @@ def _default_binary_layer(name: str, tensor: torch.Tensor) -> bool:
     name = name.lower()
     return any(token in name for token in ("binary", "bconv", "binaryactivation"))
 
-def _latent_stats(tensor: torch.Tensor) -> dict[str, Any]:
+def _latent_stats(
+    tensor: torch.Tensor,
+    *,
+    distribution_sample_size: int = 10_000,
+) -> dict[str, Any]:
     values = tensor.detach().float().reshape(-1)
     abs_values = values.abs()
+    if abs_values.numel() > distribution_sample_size:
+        sample_indices = torch.linspace(
+            0,
+            abs_values.numel() - 1,
+            distribution_sample_size,
+            dtype=torch.long,
+        )
+        distribution_values = abs_values[sample_indices]
+    else:
+        distribution_values = abs_values
     return {
         "numel": int(values.numel()),
         "min": float(values.min().item()),
@@ -46,7 +62,8 @@ def _latent_stats(tensor: torch.Tensor) -> dict[str, Any]:
         "mean_abs": float(abs_values.mean().item()),
         "median_abs": float(abs_values.median().item()),
         "zero_fraction": float((values == 0).float().mean().item()),
-        "abs_values": abs_values.tolist(),
+        "abs_values": distribution_values.tolist(),
+        "abs_values_sampled": distribution_values.numel() != abs_values.numel(),
     }
 
 """Extract latent weights and sign-binarized weights layer by layer."""
@@ -70,7 +87,13 @@ Binary weights are represented by ``sign(latent_weight)``.
 The returned ``layers`` entry contains latent distributions for every matching weight
 tensor and bit-flip counts/percentages for detected binary layers.
 """
-def compare_checkpoints(checkpoint_a: str | Path | Mapping[str, Any], checkpoint_b: str | Path | Mapping[str, Any], binary_layer_predicate: LayerPredicate | None = None) -> dict[str, Any]:
+def compare_checkpoints(
+    checkpoint_a: str | Path | Mapping[str, Any],
+    checkpoint_b: str | Path | Mapping[str, Any],
+    binary_layer_predicate: LayerPredicate | None = None,
+    *,
+    distribution_sample_size: int = 10_000,
+) -> dict[str, Any]:
     state_a = _load_state_dict(checkpoint_a)
     state_b = _load_state_dict(checkpoint_b)
     predicate = binary_layer_predicate or _default_binary_layer
@@ -94,8 +117,14 @@ def compare_checkpoints(checkpoint_a: str | Path | Mapping[str, Any], checkpoint
         tensor_b = state_b[name]
         layer_result: dict[str, Any] = {
             "shape": list(tensor_a.shape),
-            "latent_a": _latent_stats(tensor_a),
-            "latent_b": _latent_stats(tensor_b),
+            "latent_a": _latent_stats(
+                tensor_a,
+                distribution_sample_size=distribution_sample_size,
+            ),
+            "latent_b": _latent_stats(
+                tensor_b,
+                distribution_sample_size=distribution_sample_size,
+            ),
             "binary": bool(predicate(name, tensor_a)),
         }
         if layer_result["binary"]:
@@ -132,6 +161,72 @@ def save_comparison(result: dict[str, Any], output_path: str | Path) -> None:
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+
+def plot_latent_distributions(
+    result: dict[str, Any],
+    output_path: str | Path,
+) -> None:
+    """Save a compact summary of bit flips and latent magnitudes."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    layer_items = list(result["layers"].items())
+    binary_layers = [
+        (name, data)
+        for name, data in layer_items
+        if data["binary"]
+    ]
+    figure, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    if binary_layers:
+        names = [name for name, _ in binary_layers]
+        percentages = [
+            data["bit_flip_percentage"]
+            for _, data in binary_layers
+        ]
+        axes[0].bar(range(len(names)), percentages, color="tab:purple")
+        axes[0].set_xticks(range(len(names)))
+        axes[0].set_xticklabels(names, rotation=90, fontsize=7)
+        axes[0].set_ylabel("Bit flips (%)")
+        axes[0].set_title("Bit-flip percentage by binary layer")
+        axes[0].grid(axis="y", alpha=0.3)
+    else:
+        axes[0].text(0.5, 0.5, "No binary layers detected", ha="center", va="center")
+        axes[0].set_axis_off()
+
+    values_a = [
+        value
+        for _, data in layer_items
+        for value in data["latent_a"]["abs_values"]
+    ]
+    values_b = [
+        value
+        for _, data in layer_items
+        for value in data["latent_b"]["abs_values"]
+    ]
+    combined_values = values_a + values_b
+    axes[1].hist(
+        values_a,
+        bins=50,
+        range=(min(combined_values), max(combined_values)),
+        alpha=0.6,
+        density=True,
+        label="Checkpoint A",
+    )
+    axes[1].hist(
+        values_b,
+        bins=50,
+        range=(min(combined_values), max(combined_values)),
+        alpha=0.6,
+        density=True,
+        label="Checkpoint B",
+    )
+    axes[1].set_xlabel("|Latent weight|")
+    axes[1].set_ylabel("Density")
+    axes[1].set_title("Latent-weight magnitude distribution")
+    axes[1].legend()
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=160)
+    plt.close(figure)
 
 """Print every comparison metric with percentages formatted as ``0.00%``.
 The complete absolute-value distributions are already available in
