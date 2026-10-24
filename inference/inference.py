@@ -6,6 +6,7 @@ from torchvision import datasets, transforms
 from tqdm import tqdm
 from Network.ReActNet_18_Qaw import ResNet18, ResNet34
 from Network.ReActNet_A_Qaw import Reactnet
+from utils.metrics import plot_matrix
 
 sys.path.append('../')
 
@@ -24,6 +25,7 @@ MODEL_PATH = None
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 SCRIPT_DIR = Path(__file__).resolve().parent
+OUTPUT_DIR = SCRIPT_DIR / "results"
 
 DATASET_CONFIG = {
     "cifar100": {
@@ -139,6 +141,7 @@ def evaluate(model, data_loader):
     accuracy = confusion_matrix.diag().sum().float() / confusion_matrix.sum()
     print(f"Confusion_Matrix = \n{confusion_matrix}")
     print(f"acc = {accuracy.item()}")
+    return confusion_matrix
 
 
 def main():
@@ -158,7 +161,22 @@ def main():
         drop_last=False,
     )
     model = create_model()
-    evaluate(model, test_data_loader)
+    confusion_matrix = evaluate(model, test_data_loader)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    output_path = OUTPUT_DIR / f"{DATASET}_{MODEL}_confusion_matrix.png"
+    np.save(
+        OUTPUT_DIR / f"{DATASET}_{MODEL}_confusion_matrix.npy",
+        confusion_matrix.numpy(),
+    )
+    plot_matrix(
+        confusion_matrix.numpy(),
+        f"Confusion matrix - {DATASET} ({MODEL})",
+        output_path,
+        xlabel="Predicted class",
+        ylabel="True class",
+        show_ticks=DATASET_CONFIG[DATASET]["classes"] <= 100,
+    )
+    print(f"Saved confusion matrix plot to {output_path}")
 
 
 if __name__ == "__main__":

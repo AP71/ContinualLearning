@@ -53,3 +53,26 @@ class SplitCIFAR100(Dataset):
     def __getitem__(self, index: int) -> Any:
         return self.dataset[self.indices[index]]
 
+    @classmethod
+    def from_classes(
+        cls,
+        dataset: Dataset,
+        classes: Sequence[int],
+        class_order: Sequence[int] | None = None,
+    ) -> SplitCIFAR100:
+        """Create a dataset view containing an arbitrary set of CIFAR-100 classes."""
+        view = cls.__new__(cls)
+        if not hasattr(dataset, "targets"):
+            raise TypeError("dataset must expose a 'targets' attribute.")
+        view.dataset = dataset
+        view.class_order = tuple(
+            range(cls.NUM_TASKS * cls.CLASSES_PER_TASK)
+            if class_order is None
+            else class_order
+        )
+        view.indices = [
+            index for index, target in enumerate(dataset.targets) if target in set(classes)
+        ]
+        view.classes = tuple(classes)
+        view.task_id = -1
+        return view

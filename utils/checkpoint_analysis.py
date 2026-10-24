@@ -187,7 +187,6 @@ def plot_latent_distributions(
         axes[0].set_xticks(range(len(names)))
         axes[0].set_xticklabels(names, rotation=90, fontsize=7)
         axes[0].set_ylabel("Bit flips (%)")
-        axes[0].set_title("Bit-flip percentage by binary layer")
         axes[0].grid(axis="y", alpha=0.3)
     else:
         axes[0].text(0.5, 0.5, "No binary layers detected", ha="center", va="center")
@@ -222,7 +221,6 @@ def plot_latent_distributions(
     )
     axes[1].set_xlabel("|Latent weight|")
     axes[1].set_ylabel("Density")
-    axes[1].set_title("Latent-weight magnitude distribution")
     axes[1].legend()
     figure.tight_layout()
     figure.savefig(output_path, dpi=160)
