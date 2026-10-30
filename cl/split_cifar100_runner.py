@@ -166,7 +166,12 @@ def create_loader(dataset, shuffle: bool) -> DataLoader:
 
 # Model creation and training
 
-def train_epoch(model: nn.Module, loader: DataLoader, optimizer, description: str) -> float:
+def train_epoch(
+    model: nn.Module,
+    loader: DataLoader,
+    optimizer,
+    description: str,
+) -> float:
     """Run one cross-entropy training epoch and return its mean loss."""
     model.train()
     criterion = nn.CrossEntropyLoss()
@@ -310,11 +315,16 @@ def evaluate_confusion_matrix(
 
 def save_sequential_results(
     output_dir: Path,
+    initialization: str,
     standard_matrix: list[list[float | None]],
     task_matrix: list[list[float | None]],
     history: list[dict],
     accuracy_history: list[list[float]],
-    bit_flips: list[int]
+    bit_flips: list[int],
+    bit_flip_percentages: list[float],
+    total_binary_bits: int | None,
+    loss_history: list[float],
+    confusion_matrix: np.ndarray,
 ) -> None:
     """Persist sequential metrics and generate all sequential experiment plots."""
     bwt_values = [
@@ -346,16 +356,55 @@ def save_sequential_results(
             "x_label": "Number of seen classes",
             "y_label": "Accuracy (%)",
         },
+        "loss_per_epoch": {
+            "x": list(range(1, len(loss_history) + 1)),
+            "y": loss_history,
+            "x_label": "Epoch",
+            "y_label": "Loss",
+        },
     }
     results = {
+        "schema_version": 1,
         "protocol": "Split CIFAR-100 class-incremental",
+        "experiment_type": "sequential",
+        "initialization": initialization,
+        "model_name": MODEL_NAME,
         "num_tasks": 10,
         "classes_per_task": 10,
+        "epochs_completed": len(loss_history),
+        "total_epochs": 10 * EPOCHS_PER_TASK,
+        "loss": loss_history[-1] if loss_history else None,
+        "loss_history": loss_history,
         "standard_class_incremental": standard_matrix,
         "task_incremental": task_matrix,
         "history": history,
         "accuracy_history": accuracy_history,
+        "accuracy_epochs": list(range(1, len(loss_history) + 1)),
+        "best_accuracy": None,
+        "best_epoch": None,
+        "early_stopping": {"enabled": False, "evaluation_interval": None, "patience": None, "min_delta": None},
+        "standard_class_incremental_accuracy": (
+            history[-1]["standard_seen_accuracy"] if history else None
+        ),
+        "task_incremental_accuracy": (
+            float(np.mean(task_matrix[-1][: len(history)]))
+            if history
+            else None
+        ),
+        "final_accuracy_percent": (
+            100.0 * history[-1]["standard_seen_accuracy"] if history else None
+        ),
+        "confusion_matrix": confusion_matrix.tolist(),
+        "r_matrix": standard_matrix,
+        "task_incremental_r_matrix": task_matrix,
         "bit_flips": bit_flips,
+        "bit_flip_percentages": bit_flip_percentages,
+        "total_binary_bits": total_binary_bits,
+        "bit_flip_percentage": (
+            float(sum(bit_flips) / (total_binary_bits * len(bit_flips)) * 100.0)
+            if total_binary_bits and bit_flips
+            else None
+        ),
         "bwt": bwt_values,
         "accuracy_vs_classes": {
             "classes_seen": classes_seen,
@@ -443,6 +492,9 @@ def run_sequential(
     history = []
     accuracy_history = [[] for _ in range(10)]
     bit_flips = []
+    bit_flip_percentages = []
+    total_binary_bits = None
+    loss_history = []
     resume_path = Path(resume_from) if resume_from is not None else None
     output_dir = (
         resume_path.parent.parent
@@ -472,6 +524,9 @@ def run_sequential(
         history = state["history"]
         accuracy_history = state["accuracy_history"]
         bit_flips = state["bit_flips"]
+        bit_flip_percentages = state.get("bit_flip_percentages", [])
+        total_binary_bits = state.get("total_binary_bits")
+        loss_history = state.get("loss_history", [])
     for task_id in range(start_task, train_tasks.NUM_TASKS):
         train_tasks.load_task(task_id)
         train_loader = create_loader(train_tasks, True)
@@ -489,6 +544,7 @@ def run_sequential(
                 optimizer,
                 f"Task {task_id + 1}/10, epoch {epoch + 1}/{EPOCHS_PER_TASK}",
             )
+            loss_history.append(loss)
             task_accuracies = evaluate_task_accuracies(
                 model,
                 seen_test_loader,
@@ -512,6 +568,9 @@ def run_sequential(
                 history=history,
                 accuracy_history=accuracy_history,
                 bit_flips=bit_flips,
+                bit_flip_percentages=bit_flip_percentages,
+                total_binary_bits=total_binary_bits,
+                loss_history=loss_history,
             )
         current_checkpoint = checkpoint_dir / f"after_task_{task_id + 1:02d}.h5"
         torch.save(copy_model_state(model), current_checkpoint)
@@ -521,6 +580,8 @@ def run_sequential(
             compare_dir / f"task_{task_id + 1:02d}",
         )
         bit_flips.append(comparison["binary_summary"]["bit_flips"])
+        bit_flip_percentages.append(comparison["binary_summary"]["bit_flip_percentage"])
+        total_binary_bits = comparison["binary_summary"]["total_bits"]
         previous_checkpoint = current_checkpoint
         seen_tasks = [
             SplitCIFAR100(test_tasks.dataset, evaluated_id)
@@ -560,6 +621,9 @@ def run_sequential(
             history=history,
             accuracy_history=accuracy_history,
             bit_flips=bit_flips,
+            bit_flip_percentages=bit_flip_percentages,
+            total_binary_bits=total_binary_bits,
+            loss_history=loss_history,
         )
         LOGGER.info(
             "Task %d: standard=%.4f, task-incremental=%.4f.",
@@ -569,11 +633,16 @@ def run_sequential(
         )
     save_sequential_results(
         output_dir,
+        initialization,
         standard_matrix,
         task_matrix,
         history,
         accuracy_history,
         bit_flips,
+        bit_flip_percentages,
+        total_binary_bits,
+        loss_history,
+        evaluate_confusion_matrix(model, create_loader(test_tasks.dataset, False), 100),
     )
     return output_dir
 
@@ -602,6 +671,7 @@ def run_joint(
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     last_checkpoint = checkpoint_dir / "last.h5"
     loss = 0.0
+    loss_history = []
     accuracy_history = []
     accuracy_epochs = []
     best_accuracy = -float("inf")
@@ -614,6 +684,7 @@ def run_joint(
         state = load_training_checkpoint(resume_path, model, optimizer)
         start_epoch = int(state["next_epoch"])
         loss = float(state["loss"])
+        loss_history = state.get("loss_history", [])
         accuracy_history = state["accuracy_history"]
         accuracy_epochs = state["accuracy_epochs"]
         best_accuracy = float(state["best_accuracy"])
@@ -629,6 +700,7 @@ def run_joint(
             optimizer,
             f"Joint epoch {epoch + 1}/{JOINT_EPOCHS}",
         )
+        loss_history.append(loss)
         epoch_number = epoch + 1
         epochs_completed = epoch_number
         should_evaluate = (
@@ -646,6 +718,7 @@ def run_joint(
                 initialization=initialization,
                 accuracy_history=accuracy_history,
                 accuracy_epochs=accuracy_epochs,
+                loss_history=loss_history,
                 best_accuracy=best_accuracy,
                 best_state=best_state,
                 epochs_without_improvement=epochs_without_improvement,
@@ -685,6 +758,7 @@ def run_joint(
             initialization=initialization,
             accuracy_history=accuracy_history,
             accuracy_epochs=accuracy_epochs,
+            loss_history=loss_history,
             best_accuracy=best_accuracy,
             best_state=best_state,
             epochs_without_improvement=epochs_without_improvement,
@@ -813,16 +887,37 @@ def run_joint(
             "x_label": "Checkpoint transition",
             "y_label": "Bit flips (%)",
         },
+        "loss_per_epoch": {
+            "x": list(range(1, len(loss_history) + 1)),
+            "y": loss_history,
+            "x_label": "Epoch",
+            "y_label": "Loss",
+        },
+        "accuracy_vs_classes": {
+            "x": [100],
+            "y": [100.0 * standard_accuracy],
+            "x_label": "Number of seen classes",
+            "y_label": "Accuracy (%)",
+        },
     }
     results = {
+        "schema_version": 1,
         "protocol": "Split CIFAR-100 joint-training upper bound",
+        "experiment_type": "joint",
         "initialization": initialization,
+        "model_name": MODEL_NAME,
+        "num_tasks": 10,
+        "classes_per_task": 10,
+        "total_epochs": JOINT_EPOCHS,
         "loss": loss,
+        "loss_history": loss_history,
         "standard_class_incremental_accuracy": standard_accuracy,
         "task_incremental_accuracy": task_incremental_accuracy,
         "accuracy_history": accuracy_history,
         "accuracy_epochs": accuracy_epochs,
+        "history": [],
         "best_epoch": best_epoch,
+        "best_accuracy": best_accuracy,
         "epochs_completed": epochs_completed,
         "early_stopping": {
             "enabled": True,
@@ -831,12 +926,22 @@ def run_joint(
             "min_delta": JOINT_EARLY_STOPPING_MIN_DELTA,
         },
         "final_accuracy_percent": 100.0 * standard_accuracy,
-        "bit_flips": comparison["binary_summary"]["bit_flips"],
+        "bit_flips": [comparison["binary_summary"]["bit_flips"]],
         "total_binary_bits": comparison["binary_summary"]["total_bits"],
         "bit_flip_percentage": comparison["binary_summary"]["bit_flip_percentage"],
-        "confusion_matrix": confusion_matrix.tolist(),
+        "bit_flip_percentages": [
+            comparison["binary_summary"]["bit_flip_percentage"]
+        ],
+        "bwt": [0.0],
+        "standard_class_incremental": standard_r_matrix,
+        "task_incremental": task_r_matrix,
         "r_matrix": standard_r_matrix,
         "task_incremental_r_matrix": task_r_matrix,
+        "confusion_matrix": confusion_matrix.tolist(),
+        "accuracy_vs_classes": {
+            "classes_seen": [100],
+            "accuracy_percent": [100.0 * standard_accuracy],
+        },
     }
     (output_dir / "results.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
     (output_dir / "plot_points.json").write_text(
