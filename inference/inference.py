@@ -115,10 +115,11 @@ def create_model():
     if not checkpoint_path.is_file():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
-    if DEVICE.type == "cuda":
-        model = torch.nn.DataParallel(model)
-
-    state_dict = torch.load(checkpoint_path, map_location=DEVICE, weights_only=False)
+    state_dict = torch.load(checkpoint_path, map_location=DEVICE, weights_only=True)
+    state_dict = {
+        name.removeprefix("module."): tensor
+        for name, tensor in state_dict.items()
+    }
     model.load_state_dict(state_dict)
     return model.to(DEVICE)
 

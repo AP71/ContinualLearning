@@ -22,7 +22,7 @@ if str(ROOT) not in sys.path:
 
 from Network.ReActNet_18_Qaw import ResNet18
 from Network.ReActNet_A_Qaw import Reactnet
-from datasets.split_cifar100 import SplitCIFAR100
+from datasets.CIFAR100 import CIFAR100
 from utils.checkpoint_analysis import (
     compare_checkpoints,
     plot_latent_distributions,
@@ -39,8 +39,8 @@ DATASET_PATH = Path(r"F:/Dataset/CIFAR-100/")
 CHECKPOINT_PATH: Path | None = None
 MODEL_NAME = "resneta"
 OUTPUT_ROOT = ROOT / "cl" / "results"
-BATCH_SIZE = 1024
-WORKERS = 8
+BATCH_SIZE = 256
+WORKERS = 0
 EPOCHS_PER_TASK = 10
 JOINT_EPOCHS = 100
 JOINT_EVAL_INTERVAL = 5
@@ -51,6 +51,8 @@ WEIGHT_DECAY = 0.0
 SEED = 2023
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 LOGGER = logging.getLogger("split_cifar100")
+torch.set_float32_matmul_precision("high")
+_CLASS_TENSOR_CACHE: dict[tuple[int, ...], torch.Tensor] = {}
 
 
 # Reproducibility and data preparation
@@ -85,7 +87,8 @@ def create_transforms() -> tuple[transforms.Compose, transforms.Compose]:
     return train_transform, test_transform
 
 
-def create_datasets() -> tuple[SplitCIFAR100, SplitCIFAR100]:
+
+def create_datasets() -> tuple[CIFAR100, CIFAR100]:
     """Load CIFAR-100 and expose it through the split-task dataset wrapper."""
     train_transform, test_transform = create_transforms()
     train_data = datasets.CIFAR100(
@@ -94,7 +97,7 @@ def create_datasets() -> tuple[SplitCIFAR100, SplitCIFAR100]:
     test_data = datasets.CIFAR100(
         DATASET_PATH, train=False, download=False, transform=test_transform
     )
-    return SplitCIFAR100(train_data), SplitCIFAR100(test_data)
+    return CIFAR100(train_data), CIFAR100(test_data)
 
 
 def create_model(initialization: str) -> nn.Module:
@@ -114,33 +117,21 @@ def create_model(initialization: str) -> nn.Module:
         checkpoint = CHECKPOINT_PATH or ROOT / "inference" / "models" / checkpoint_name
         if not checkpoint.is_file():
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
-        state_dict = torch.load(checkpoint, map_location=DEVICE, weights_only=False)
+        state_dict = torch.load(checkpoint, map_location=DEVICE, weights_only=True)
         if isinstance(state_dict, dict) and "state_dict" in state_dict:
             state_dict = state_dict["state_dict"]
-        if DEVICE.type == "cuda":
-            model = nn.DataParallel(model)
+        state_dict = {
+            name.removeprefix("module."): tensor
+            for name, tensor in state_dict.items()
+        }
         model_state = model.state_dict()
         compatible_state = {}
         skipped_keys = []
         for name, tensor in state_dict.items():
-            candidate_names = [name]
-            if name.startswith("module."):
-                candidate_names.append(name.removeprefix("module."))
-            else:
-                candidate_names.append(f"module.{name}")
-            matching_name = next(
-                (
-                    candidate
-                    for candidate in candidate_names
-                    if candidate in model_state
-                    and model_state[candidate].shape == tensor.shape
-                ),
-                None,
-            )
-            if matching_name is None:
+            if name not in model_state or model_state[name].shape != tensor.shape:
                 skipped_keys.append(name)
             else:
-                compatible_state[matching_name] = tensor
+                compatible_state[name] = tensor
         model.load_state_dict(compatible_state, strict=False)
         LOGGER.info(
             "Loaded %d compatible tensors from %s; skipped %d tensors "
@@ -171,6 +162,7 @@ def train_epoch(
     loader: DataLoader,
     optimizer,
     description: str,
+    scaler: torch.amp.GradScaler,
 ) -> float:
     """Run one cross-entropy training epoch and return its mean loss."""
     model.train()
@@ -182,9 +174,15 @@ def train_epoch(
         images = images.to(DEVICE, non_blocking=True)
         labels = labels.to(DEVICE, non_blocking=True)
         optimizer.zero_grad(set_to_none=True)
-        loss = criterion(model(images), labels)
-        loss.backward()
-        optimizer.step()
+        with torch.amp.autocast(
+            device_type="cuda",
+            dtype=torch.float16,
+            enabled=DEVICE.type == "cuda",
+        ):
+            loss = criterion(model(images), labels)
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
         loss_sum += loss.item() * labels.size(0)
         samples += labels.size(0)
         progress.set_postfix(loss=f"{loss_sum / samples:.4f}")
@@ -218,30 +216,41 @@ def load_training_checkpoint(
     path: Path,
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
+    scaler: torch.amp.GradScaler | None = None,
 ) -> dict[str, object]:
     """Restore a resumable checkpoint and return its experiment state."""
     if not path.is_file():
         raise FileNotFoundError(f"Training checkpoint not found: {path}")
-    checkpoint = torch.load(path, map_location=DEVICE, weights_only=False)
+    checkpoint = torch.load(path, map_location=DEVICE, weights_only=True)
     if not isinstance(checkpoint, dict):
         raise ValueError(f"Invalid training checkpoint: {path}")
     model.load_state_dict(checkpoint["model_state"])
     optimizer.load_state_dict(checkpoint["optimizer_state"])
+    if scaler is not None and "scaler_state" in checkpoint:
+        scaler.load_state_dict(checkpoint["scaler_state"])
     return checkpoint
 
 
 # Evaluation and result serialization
 
 def evaluate(
-    model: nn.Module, loader: DataLoader, allowed_classes: tuple[int, ...] | None = None
+    model: nn.Module,
+    loader: DataLoader,
+    allowed_classes: torch.Tensor | tuple[int, ...] | None = None,
 ) -> float:
     """Measure top-1 accuracy, optionally restricting predictions to task classes."""
     model.eval()
     correct = 0
     total = 0
-    class_tensor = (
-        torch.tensor(allowed_classes, device=DEVICE) if allowed_classes is not None else None
-    )
+    if isinstance(allowed_classes, torch.Tensor):
+        class_tensor = allowed_classes
+    elif allowed_classes is not None:
+        class_tensor = _CLASS_TENSOR_CACHE.get(allowed_classes)
+        if class_tensor is None:
+            class_tensor = torch.tensor(allowed_classes, device=DEVICE)
+            _CLASS_TENSOR_CACHE[allowed_classes] = class_tensor
+    else:
+        class_tensor = None
     with torch.no_grad():
         for images, labels in loader:
             images = images.to(DEVICE, non_blocking=True)
@@ -264,11 +273,11 @@ def evaluate_task_accuracies(
 ) -> list[float]:
     """Measure unrestricted accuracy for every task in one test-set pass."""
     model.eval()
-    num_tasks = len(class_order) // SplitCIFAR100.CLASSES_PER_TASK
+    num_tasks = len(class_order) // CIFAR100.CLASSES_PER_TASK
     class_to_task = torch.empty(len(class_order), dtype=torch.long, device=DEVICE)
     for task_id in range(num_tasks):
-        start = task_id * SplitCIFAR100.CLASSES_PER_TASK
-        task_classes = class_order[start : start + SplitCIFAR100.CLASSES_PER_TASK]
+        start = task_id * CIFAR100.CLASSES_PER_TASK
+        task_classes = class_order[start : start + CIFAR100.CLASSES_PER_TASK]
         class_to_task[list(task_classes)] = task_id
 
     correct_by_task = torch.zeros(num_tasks, dtype=torch.long, device=DEVICE)
@@ -482,11 +491,12 @@ def run_sequential(
     set_seed()
     train_tasks, test_tasks = create_datasets()
     test_task_loaders = [
-        create_loader(SplitCIFAR100(test_tasks.dataset, task_id), False)
+        create_loader(CIFAR100(test_tasks.dataset, task_id), False)
         for task_id in range(train_tasks.NUM_TASKS)
     ]
     model = create_model(initialization)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    scaler = torch.amp.GradScaler("cuda", enabled=DEVICE.type == "cuda")
     standard_matrix = [[None] * 10 for _ in range(10)]
     task_matrix = [[None] * 10 for _ in range(10)]
     history = []
@@ -515,7 +525,7 @@ def run_sequential(
     if resume_path is None:
         torch.save(copy_model_state(model), initial_checkpoint)
     else:
-        state = load_training_checkpoint(resume_path, model, optimizer)
+        state = load_training_checkpoint(resume_path, model, optimizer, scaler)
         start_task = int(state["next_task"])
         start_epoch = int(state["next_epoch"])
         previous_checkpoint = Path(state["previous_checkpoint"])
@@ -530,11 +540,6 @@ def run_sequential(
     for task_id in range(start_task, train_tasks.NUM_TASKS):
         train_tasks.load_task(task_id)
         train_loader = create_loader(train_tasks, True)
-        seen_test_tasks = [
-            SplitCIFAR100(test_tasks.dataset, evaluated_id)
-            for evaluated_id in range(task_id + 1)
-        ]
-        seen_test_loader = create_loader(ConcatDataset(seen_test_tasks), False)
         loss = 0.0
         first_epoch = start_epoch if task_id == start_task else 0
         for epoch in range(first_epoch, EPOCHS_PER_TASK):
@@ -543,18 +548,18 @@ def run_sequential(
                 train_loader,
                 optimizer,
                 f"Task {task_id + 1}/10, epoch {epoch + 1}/{EPOCHS_PER_TASK}",
+                scaler,
             )
             loss_history.append(loss)
-            task_accuracies = evaluate_task_accuracies(
+            current_task_accuracy = evaluate(
                 model,
-                seen_test_loader,
-                test_tasks.class_order,
+                test_task_loaders[task_id],
+                tuple(test_tasks.class_order[task_id * 10 : (task_id + 1) * 10]),
             )
             for evaluated_id in range(train_tasks.NUM_TASKS):
-                if evaluated_id <= task_id:
-                    accuracy_history[evaluated_id].append(task_accuracies[evaluated_id])
-                else:
-                    accuracy_history[evaluated_id].append(0.0)
+                accuracy_history[evaluated_id].append(
+                    current_task_accuracy if evaluated_id == task_id else 0.0
+                )
             save_training_checkpoint(
                 last_checkpoint,
                 model,
@@ -571,6 +576,7 @@ def run_sequential(
                 bit_flip_percentages=bit_flip_percentages,
                 total_binary_bits=total_binary_bits,
                 loss_history=loss_history,
+                scaler_state=scaler.state_dict(),
             )
         current_checkpoint = checkpoint_dir / f"after_task_{task_id + 1:02d}.h5"
         torch.save(copy_model_state(model), current_checkpoint)
@@ -584,7 +590,7 @@ def run_sequential(
         total_binary_bits = comparison["binary_summary"]["total_bits"]
         previous_checkpoint = current_checkpoint
         seen_tasks = [
-            SplitCIFAR100(test_tasks.dataset, evaluated_id)
+            CIFAR100(test_tasks.dataset, evaluated_id)
             for evaluated_id in range(task_id + 1)
         ]
         seen_loader = create_loader(ConcatDataset(seen_tasks), False)
@@ -624,6 +630,7 @@ def run_sequential(
             bit_flip_percentages=bit_flip_percentages,
             total_binary_bits=total_binary_bits,
             loss_history=loss_history,
+            scaler_state=scaler.state_dict(),
         )
         LOGGER.info(
             "Task %d: standard=%.4f, task-incremental=%.4f.",
@@ -657,6 +664,7 @@ def run_joint(
     model = create_model(initialization)
     initial_state = copy_model_state(model)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    scaler = torch.amp.GradScaler("cuda", enabled=DEVICE.type == "cuda")
     train_loader = create_loader(train_tasks.dataset, True)
     test_loader = create_loader(test_tasks.dataset, False)
     resume_path = Path(resume_from) if resume_from is not None else None
@@ -681,7 +689,7 @@ def run_joint(
     epochs_completed = 0
     start_epoch = 0
     if resume_path is not None:
-        state = load_training_checkpoint(resume_path, model, optimizer)
+        state = load_training_checkpoint(resume_path, model, optimizer, scaler)
         start_epoch = int(state["next_epoch"])
         loss = float(state["loss"])
         loss_history = state.get("loss_history", [])
@@ -699,6 +707,7 @@ def run_joint(
             train_loader,
             optimizer,
             f"Joint epoch {epoch + 1}/{JOINT_EPOCHS}",
+            scaler,
         )
         loss_history.append(loss)
         epoch_number = epoch + 1
@@ -725,6 +734,7 @@ def run_joint(
                 best_epoch=best_epoch,
                 epochs_completed=epochs_completed,
                 initial_state=initial_state,
+                scaler_state=scaler.state_dict(),
             )
             continue
 
@@ -765,6 +775,7 @@ def run_joint(
             best_epoch=best_epoch,
             epochs_completed=epochs_completed,
             initial_state=initial_state,
+            scaler_state=scaler.state_dict(),
         )
         if epochs_without_improvement >= JOINT_EARLY_STOPPING_PATIENCE:
             LOGGER.info(
@@ -780,7 +791,7 @@ def run_joint(
             [
                 evaluate(
                     model,
-                    create_loader(SplitCIFAR100(test_tasks.dataset, task_id), False),
+                    create_loader(CIFAR100(test_tasks.dataset, task_id), False),
                     tuple(test_tasks.class_order[task_id * 10 : (task_id + 1) * 10]),
                 )
                 for task_id in range(train_tasks.NUM_TASKS)
@@ -955,7 +966,7 @@ def resume_sequential(last_checkpoint: Path | str) -> Path:
     checkpoint = Path(last_checkpoint)
     if checkpoint.is_dir():
         checkpoint = checkpoint / "checkpoints" / "last.h5"
-    state = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    state = torch.load(checkpoint, map_location="cpu", weights_only=True)
     return run_sequential(
         initialization=state.get("initialization", "checkpoint"),
         resume_from=checkpoint,
@@ -967,8 +978,14 @@ def resume_joint(last_checkpoint: Path | str) -> Path:
     checkpoint = Path(last_checkpoint)
     if checkpoint.is_dir():
         checkpoint = checkpoint / "checkpoints" / "last.h5"
-    state = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    state = torch.load(checkpoint, map_location="cpu", weights_only=True)
     return run_joint(
         initialization=state.get("initialization", "checkpoint"),
         resume_from=checkpoint,
     )
+
+if __name__ == "__main__":
+    run_sequential("checkpoint")
+    # run_sequential("random")
+    # run_joint("checkpoint")
+    # run_joint("random")

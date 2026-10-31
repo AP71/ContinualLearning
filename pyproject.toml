@@ -1,16 +1,22 @@
 [project]
 name = "reactnet"
 version = "0.1.0"
-requires-python = ">=3.14"
+requires-python = ">=3.11,<3.13"
 dependencies = [
     "torch",
     "torchvision",
     "torchaudio",
-    "scipy>=1.18.1",
-    "ipykernel>=7.4.0",
-    "tqdm>=4.70.1",
-    "matplotlib>=3.11.2",
-    "numpy>=2.5.4",
+    "scipy",
+    "ipykernel",
+    "tqdm",
+    "matplotlib",
+    "numpy",
+    "avalanche-lib",
+]
+
+[tool.uv]
+override-dependencies = [
+    "qpsolvers>=4.0.0",  # Sovrascrive qpsolvers[open-source-solvers] rimuovendo la dipendenza da proxsuite
 ]
 
 [[tool.uv.index]]
@@ -20,3 +26,5 @@ explicit = true
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu132" }
+torchvision = { index = "pytorch-cu132" }
+torchaudio = { index = "pytorch-cu132" }

@@ -1,5 +1,5 @@
 """Dataset wrappers used by the continual-learning experiments."""
 
-from .split_cifar100 import SplitCIFAR100
+from .CIFAR100 import CIFAR100
 
-__all__ = ["SplitCIFAR100"]
+__all__ = ["CIFAR100"]

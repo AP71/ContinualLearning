@@ -10,7 +10,7 @@ from torch.utils.data import Dataset
     training phase to switch this view to the next task, then create a new
     ``DataLoader`` for the updated dataset.
 """
-class SplitCIFAR100(Dataset):
+class CIFAR100(Dataset):
     NUM_TASKS = 10
     CLASSES_PER_TASK = 10
 
@@ -36,7 +36,7 @@ class SplitCIFAR100(Dataset):
         A new ``DataLoader`` should be created after this call, especially
         when it uses worker processes.
     """
-    def load_task(self, task_id: int) -> SplitCIFAR100:
+    def load_task(self, task_id: int) -> CIFAR100:
         if not 0 <= task_id < self.NUM_TASKS:
             raise ValueError(f"task_id must be between 0 and 9, got {task_id}.")
 
@@ -59,7 +59,7 @@ class SplitCIFAR100(Dataset):
         dataset: Dataset,
         classes: Sequence[int],
         class_order: Sequence[int] | None = None,
-    ) -> SplitCIFAR100:
+    ) -> CIFAR100:
         """Create a dataset view containing an arbitrary set of CIFAR-100 classes."""
         view = cls.__new__(cls)
         if not hasattr(dataset, "targets"):

@@ -14,7 +14,7 @@ SEED = 1234
 checkpoint = torch.load(
     SOURCE,
     map_location="cpu",
-    weights_only=False,
+    weights_only=True,
 )
 
 modified_checkpoint = deepcopy(checkpoint)

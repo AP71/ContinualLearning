@@ -12,7 +12,7 @@ LayerPredicate = Callable[[str, torch.Tensor], bool]
 """Load a state dict from a path, a raw state dict, or a Lightning checkpoint."""
 def _load_state_dict(checkpoint: str | Path | Mapping[str, Any]) -> dict[str, torch.Tensor]:
     if isinstance(checkpoint, (str, Path)):
-        checkpoint = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        checkpoint = torch.load(checkpoint, map_location="cpu", weights_only=True)
 
     if not isinstance(checkpoint, Mapping):
         raise TypeError("A checkpoint must be a path or a mapping.")

@@ -3,14 +3,16 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.ticker import PercentFormatter
 
-def calculate_bwt(R):
-    T = len(R)
+def calculate_bwt(matrix: list[list[float | None]]) -> float:
+    """Calcola il Backward Transfer (BWT) in percentuale gestendo i valori None."""
+    T = len(matrix)
     if T <= 1:
         return 0.0
-    bwt_sum = 0.0
+    diffs = []
     for i in range(T - 1):
-        bwt_sum += (R[T - 1][i] - R[i][i])
-    return bwt_sum / (T - 1)
+        if matrix[T - 1][i] is not None and matrix[i][i] is not None:
+            diffs.append(matrix[T - 1][i] - matrix[i][i])
+    return float(np.mean(diffs) * 100.0) if diffs else 0.0
 
 def plot_accuracy_history(
     accuracy_history, output_path, task_start_epochs=None, title=None, epoch_points=None
