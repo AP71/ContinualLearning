@@ -2,32 +2,36 @@
 
 from __future__ import annotations
 
+import json
 import logging
-import random
 import sys
 from datetime import datetime
 from pathlib import Path
 
-import numpy as np
 import torch
+from avalanche.training import Naive
 from torch import nn
-from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
 # Avalanche imports
-from avalanche.benchmarks import nc_benchmark
 from avalanche.logging import InteractiveLogger, TextLogger
-from avalanche.training.plugins import EvaluationPlugin, SupervisedPlugin
-from avalanche.training.supervised import Naive
+from avalanche.training.plugins import EvaluationPlugin, LRSchedulerPlugin
 
 from avalanche_plugin.epoch_tracker import EpochTrackerPlugin
+from avalanche_plugin.utils import evaluate_dataset, set_seed, create_benchmark, create_model, evaluate_confusion_matrix
+
+_orig_multistep_init = torch.optim.lr_scheduler.MultiStepLR.__init__
+
+def _patched_multistep_init(self, *args, **kwargs):
+    kwargs.pop('verbose', None)
+    _orig_multistep_init(self, *args, **kwargs)
+
+torch.optim.lr_scheduler.MultiStepLR.__init__ = _patched_multistep_init
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from Network.ReActNet_18_Qaw import ResNet18
-from Network.ReActNet_A_Qaw import Reactnet
 from avalanche_plugin.checkpoint_and_BitFlip import CheckpointAndBitFlipPlugin
 from avalanche_plugin.results import save_avalanche_sequential_results
 
@@ -37,137 +41,45 @@ MODEL_NAME = "resneta"
 OUTPUT_ROOT = ROOT / "cl" / "results"
 BATCH_SIZE = 256
 WORKERS = 0
-EPOCHS_PER_TASK = 10
-LEARNING_RATE = 1e-4
+EPOCHS_PER_TASK = 30
+LEARNING_RATE = 1e-3
 WEIGHT_DECAY = 0.0
-SEED = 2023
+SEEDS = (42, 2023, 3047)
+SEED = SEEDS[1]
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 LOGGER = logging.getLogger("split_cifar100")
 torch.set_float32_matmul_precision("high")
 
 
-def set_seed() -> None:
-    random.seed(SEED)
-    np.random.seed(SEED)
-    torch.manual_seed(SEED)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(SEED)
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = True
-
-
-def create_model(initialization: str) -> nn.Module:
-    if MODEL_NAME == "resneta":
-        model = Reactnet(num_classes=100, imagenet=False)
-        checkpoint_name = "imagenet_reactneta_step2.h5"
-    elif MODEL_NAME == "resnet18":
-        model = ResNet18(num_classes=100, imagenet=False)
-        checkpoint_name = "imagenet_resnet18_step2.h5"
-    else:
-        raise ValueError(f"Unsupported model: {MODEL_NAME}")
-
-    if initialization == "checkpoint":
-        checkpoint = CHECKPOINT_PATH or ROOT / "inference" / "models" / checkpoint_name
-        if not checkpoint.is_file():
-            raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
-        state_dict = torch.load(checkpoint, map_location=DEVICE, weights_only=True)
-        if isinstance(state_dict, dict) and "state_dict" in state_dict:
-            state_dict = state_dict["state_dict"]
-
-        state_dict = {
-            name.removeprefix("module."): tensor for name, tensor in state_dict.items()
-        }
-        model_state = model.state_dict()
-        compatible_state = {
-            k: v for k, v in state_dict.items()
-            if k in model_state and model_state[k].shape == v.shape
-        }
-        model.load_state_dict(compatible_state, strict=False)
-        LOGGER.info("Loaded %d compatible tensors from %s", len(compatible_state), checkpoint)
-    return model.to(DEVICE)
-
-
-def create_benchmark():
-    train_transform = transforms.Compose([
-        transforms.Pad(4, padding_mode="reflect"),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomCrop(32),
-        transforms.ToTensor(),
-        transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-    ])
-    test_transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-    ])
-
-    train_data = datasets.CIFAR100(DATASET_PATH, train=True, download=False, transform=train_transform)
-    test_data = datasets.CIFAR100(DATASET_PATH, train=False, download=False, transform=test_transform)
-
-    return nc_benchmark(
-        train_dataset=train_data,
-        test_dataset=test_data,
-        n_experiences=10,
-        task_labels=False,  # Class-incremental
-        shuffle=False,
-        seed=SEED,
-    )
-
-
-def evaluate_dataset(
-    model: nn.Module,
-    dataset,
-    device: torch.device,
-    allowed_classes: torch.Tensor | None = None,
-) -> float:
-    """Valuta l'accuratezza su un dataset, con opzione di logit masking per task-incremental."""
-    loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=WORKERS)
-    model.eval()
-    correct = 0
-    total = 0
-    with torch.no_grad():
-        for batch in loader:
-            # Gestisce sia batch a 2 elementi (PyTorch standard) sia a 3 elementi (Avalanche con task_id)
-            images, labels = batch[0], batch[1]
-            images = images.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
-            logits = model(images)
-            if allowed_classes is not None:
-                logits = logits.index_select(1, allowed_classes)
-                preds = allowed_classes[logits.argmax(1)]
-            else:
-                preds = logits.argmax(1)
-            correct += int((preds == labels).sum().item())
-            total += labels.numel()
-    return correct / total if total else 0.0
-
-
-def evaluate_confusion_matrix(model: nn.Module, full_test_dataset, device: torch.device) -> np.ndarray:
-    """Calcola la matrice di confusione 100x100 su tutto il test set CIFAR-100."""
-    loader = DataLoader(full_test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=WORKERS)
-    matrix = np.zeros((100, 100), dtype=np.int64)
-    model.eval()
-    with torch.no_grad():
-        for images, labels in loader:
-            images = images.to(device, non_blocking=True)
-            preds = model(images).argmax(1).cpu()
-            indices = labels * 100 + preds
-            matrix += (
-                torch.bincount(indices, minlength=10000)
-                .reshape(100, 100)
-                .numpy()
-            )
-    return matrix
-
-
-def run_sequential_avalanche(initialization: str = "checkpoint"):
-    set_seed()
-    output_dir = OUTPUT_ROOT / f"cifar100_avalanche_{initialization}_{datetime.now():%Y%m%d_%H%M%S}"
+def run_sequential_avalanche(
+    initialization: str = "checkpoint",
+    output_dir: Path | None = None,
+):
+    set_seed(seed=SEED)
+    if output_dir is None:
+        output_dir = OUTPUT_ROOT / (
+            f"cifar100_avalanche_naive_{initialization}_{MODEL_NAME}_"
+            f"seed{SEED}_{datetime.now():%Y%m%d_%H%M%S}"
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    scenario = create_benchmark()
+    scenario = create_benchmark(DATASET_PATH, SEED)
     num_tasks = scenario.n_experiences
-    model = create_model(initialization)
+    model = create_model(initialization, DEVICE, LOGGER, CHECKPOINT_PATH, ROOT)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+
+    scheduler = torch.optim.lr_scheduler.MultiStepLR(
+        optimizer,
+        milestones=[20, 25],
+        gamma=0.1
+    )
+
+    lr_scheduler_plugin = LRSchedulerPlugin(
+        scheduler,
+        step_granularity='epoch',
+        reset_scheduler=True,
+        reset_lr=True
+    )
 
     # Plugin per salvare i pesi e calcolare i bit-flips
     custom_plugin = CheckpointAndBitFlipPlugin(
@@ -181,7 +93,10 @@ def run_sequential_avalanche(initialization: str = "checkpoint"):
         test_stream=scenario.test_stream,
         num_tasks=num_tasks,
         device=DEVICE,
+        batch_size=BATCH_SIZE,
+        num_workers=WORKERS,
     )
+
 
     loggers = [
         InteractiveLogger(),
@@ -197,7 +112,7 @@ def run_sequential_avalanche(initialization: str = "checkpoint"):
         train_epochs=EPOCHS_PER_TASK,
         eval_mb_size=BATCH_SIZE,
         device=DEVICE,
-        plugins=[custom_plugin, epoch_tracker],
+        plugins=[custom_plugin, epoch_tracker, lr_scheduler_plugin],
         evaluator=eval_plugin,
     )
 
@@ -232,6 +147,8 @@ def run_sequential_avalanche(initialization: str = "checkpoint"):
                 test_dataset,
                 DEVICE,
                 allowed_classes=task_classes_tensors[evaluated_id],
+                batch_size=BATCH_SIZE,
+                num_workers=WORKERS,
             )
             task_matrix[task_id][evaluated_id] = task_acc
 
@@ -248,9 +165,8 @@ def run_sequential_avalanche(initialization: str = "checkpoint"):
             transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
         ]),
     )
-    conf_matrix = evaluate_confusion_matrix(strategy.model, full_test_dataset, DEVICE)
+    conf_matrix = evaluate_confusion_matrix(strategy.model, full_test_dataset, DEVICE, batch_size=BATCH_SIZE, num_workers=WORKERS)
 
-    # Salvataggio di tutti i plot e dei file JSON identici a base_train_3.py
     save_avalanche_sequential_results(
         output_dir=output_dir,
         standard_matrix=standard_matrix,
@@ -264,8 +180,39 @@ def run_sequential_avalanche(initialization: str = "checkpoint"):
         initialization=initialization,
         confusion_matrix_arr=conf_matrix,
     )
-    print(f"\n[Completato] Grafici e JSON salvati con successo in: {output_dir}")
+    print(f"\n[Completato] JSON salvato in: {output_dir}")
+    return output_dir
+
+
+def run_three_seeds(initialization: str = "checkpoint") -> Path:
+    """Run Avalanche for all seeds inside one parent experiment directory."""
+    global SEED
+    aggregate_dir = OUTPUT_ROOT / (
+        f"cifar100_avalanche_naive_{initialization}_{MODEL_NAME}_3seeds"
+    )
+    aggregate_dir.mkdir(parents=True, exist_ok=True)
+    results_by_seed = {}
+    for seed in SEEDS:
+        SEED = seed
+        output_dir = aggregate_dir / f"seed{seed}"
+        run_sequential_avalanche(initialization, output_dir=output_dir)
+        results_path = output_dir / "results.json"
+        result = json.loads(results_path.read_text(encoding="utf-8"))
+        result["seed"] = seed
+        results_by_seed[str(seed)] = result
+
+    aggregate = {
+        "schema_version": 2,
+        "experiment_type": "sequential",
+        "model_name": MODEL_NAME,
+        "initialization": initialization,
+        "seeds": results_by_seed,
+    }
+    (aggregate_dir / "results.json").write_text(
+        json.dumps(aggregate, indent=2), encoding="utf-8"
+    )
+    return aggregate_dir
 
 
 if __name__ == "__main__":
-    run_sequential_avalanche("checkpoint")
+    run_three_seeds("checkpoint")

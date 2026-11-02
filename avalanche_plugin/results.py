@@ -7,10 +7,6 @@ import torch
 
 from utils.metrics import (
     calculate_bwt,
-    plot_accuracy_history,
-    plot_accuracy_vs_classes,
-    plot_matrix,
-    plot_task_metric,
 )
 
 
@@ -27,7 +23,7 @@ def save_avalanche_sequential_results(
     initialization: str = "checkpoint",
     confusion_matrix_arr: np.ndarray | None = None,
 ) -> None:
-    """Salva tutti i plot e i file results.json e plot_points.json conformi a base_train_3.py."""
+    """Salva i risultati; i grafici sono generati da utils/analyze_results.py."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -156,51 +152,3 @@ def save_avalanche_sequential_results(
 
     (output_dir / "results.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
     (output_dir / "plot_points.json").write_text(json.dumps(plot_points, indent=2), encoding="utf-8")
-
-    # 6. Generazione e salvataggio di tutti i grafici PNG con le etichette corrette
-    plot_matrix(
-        standard_matrix,
-        "Standard class-incremental accuracy",
-        output_dir / "standard_r_matrix.png",
-        xlabel="Evaluated task",
-        ylabel="Training task",
-        cmap="Blues",
-        vmin=0.0,
-        vmax=1.0,
-    )
-    plot_matrix(
-        task_matrix,
-        "Task-incremental accuracy (masked logits)",
-        output_dir / "task_incremental_r_matrix.png",
-        xlabel="Evaluated task",
-        ylabel="Training task",
-        cmap="Blues",
-        vmin=0.0,
-        vmax=1.0,
-    )
-    plot_accuracy_history(
-        accuracy_history,
-        output_dir / "accuracy_per_epoch.png",
-        title="Accuracy per epoch",
-    )
-    plot_task_metric(
-        bwt_values,
-        "BWT (%)",
-        "Backward transfer per task",
-        output_dir / "bwt_per_task.png",
-        connect_points=True,
-        percentage_axis=True,
-    )
-    plot_task_metric(
-        bit_flips,
-        "Bit flips",
-        "Binary bit flips per task",
-        output_dir / "bitflips_per_task.png",
-        connect_points=True,
-    )
-    plot_accuracy_vs_classes(
-        class_incremental_accuracy,
-        classes_seen,
-        output_dir / "accuracy_vs_classes.png",
-    )
-

@@ -4,7 +4,6 @@ import numpy as np
 import torch
 from torchvision import datasets, transforms
 from tqdm import tqdm
-from Network.ReActNet_18_Qaw import ResNet18, ResNet34
 from Network.ReActNet_A_Qaw import Reactnet
 from utils.metrics import plot_matrix
 
@@ -12,7 +11,7 @@ sys.path.append('../')
 
 # Select the experiment here. The remaining settings are shared by all datasets.
 DATASET = "imagenet" # "cifar100" or "imagenet"
-MODEL = "resneta"  # CIFAR: "resnet18" or "resneta"; ImageNet: "resnet18", "resnet34" or "resneta"
+MODEL = "resneta"
 DATASET_PATHS = {
     "cifar100": r"F:/Dataset/CIFAR-100/",
     "imagenet": r"F:/Dataset/ImageNet/",
@@ -32,7 +31,6 @@ DATASET_CONFIG = {
         "classes": 100,
         "imagenet": False,
         "checkpoint": {
-            "resnet18": "cifar100_reactnet18_step2.h5",
             "resneta": "cifar100_reactneta_step2.h5",
         },
     },
@@ -40,8 +38,6 @@ DATASET_CONFIG = {
         "classes": 1000,
         "imagenet": True,
         "checkpoint": {
-            "resnet18": "imagenet_reactnet18_step2.h5",
-            "resnet34": "imagenet_reactnet34_step2.h5",
             "resneta": "imagenet_reactneta_step2.h5",
         },
     },
@@ -96,14 +92,7 @@ def create_model():
     config = DATASET_CONFIG[DATASET]
     classes = config["classes"]
 
-    if MODEL == "resnet18":
-        model = ResNet18(num_classes=classes, imagenet=config["imagenet"])
-    elif MODEL == "resnet34" and DATASET == "imagenet":
-        model = ResNet34(num_classes=classes, imagenet=True)
-    elif MODEL == "resneta":
-        model = Reactnet(num_classes=classes, imagenet=config["imagenet"])
-    else:
-        raise ValueError(f"Unsupported model '{MODEL}' for dataset '{DATASET}'.")
+    model = Reactnet(num_classes=classes, imagenet=config["imagenet"])
 
     checkpoint_name = config["checkpoint"].get(MODEL)
     if MODEL_PATH:

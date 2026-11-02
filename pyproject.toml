@@ -10,8 +10,9 @@ dependencies = [
     "ipykernel",
     "tqdm",
     "matplotlib",
-    "numpy",
+    "numpy<2.0.0",
     "avalanche-lib",
+    "quadprog",
 ]
 
 [tool.uv]

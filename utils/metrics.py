@@ -1,21 +1,35 @@
+from __future__ import annotations
+
 from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.ticker import PercentFormatter
+
 
 def calculate_bwt(matrix: list[list[float | None]]) -> float:
-    """Calcola il Backward Transfer (BWT) in percentuale gestendo i valori None."""
+    """Calcola il Backward Transfer medio (BWT) in percentuale [-100, 0]."""
     T = len(matrix)
     if T <= 1:
         return 0.0
     diffs = []
     for i in range(T - 1):
         if matrix[T - 1][i] is not None and matrix[i][i] is not None:
-            diffs.append(matrix[T - 1][i] - matrix[i][i])
-    return float(np.mean(diffs) * 100.0) if diffs else 0.0
+            diff = matrix[T - 1][i] - matrix[i][i]
+            # Se la differenza e' espressa in scala [0, 1], convertila in percentuale [-100, 100]
+            if abs(diff) <= 1.0:
+                diff *= 100.0
+            diffs.append(diff)
+
+    return float(np.mean(diffs)) if diffs else 0.0
+
 
 def plot_accuracy_history(
-    accuracy_history, output_path, task_start_epochs=None, title=None, epoch_points=None
+    accuracy_history,
+    output_path,
+    task_start_epochs=None,
+    title=None,
+    epoch_points=None,
+    variance_history=None,
+    show_markers=True,
 ):
     """Plot one accuracy curve for every task over global training epochs."""
     figure, axis = plt.subplots(figsize=(10, 6))
@@ -32,70 +46,116 @@ def plot_accuracy_history(
         axis.plot(
             epochs,
             values,
-            marker=markers[task_id % len(markers)],
-            markersize=4,
+            marker=markers[task_id % len(markers)] if show_markers else None,
+            markersize=4 if show_markers else 0,
             label=f"Task {task_id + 1}",
         )
-    axis.set_xlabel("Epoch")
-    axis.set_ylabel("Accuracy")
+        if variance_history is not None:
+            variance = np.asarray(variance_history[task_id], dtype=float)
+            axis.fill_between(
+                epochs,
+                np.asarray(values, dtype=float) - variance,
+                np.asarray(values, dtype=float) + variance,
+                alpha=0.15,
+            )
+    if title:
+        axis.set_title(title, fontsize=13, pad=10)
+    axis.set_xlabel("Epoch", fontsize=11)
+    axis.set_ylabel("Accuracy", fontsize=11)
     axis.set_xlim(left=1)
     axis.set_ylim(0.0, 1.0)
     axis.grid(True, alpha=0.3)
-    axis.legend(ncol=2)
+    axis.legend(ncol=2, loc="lower right")
     figure.tight_layout()
-    figure.savefig(Path(output_path), dpi=160)
+    figure.savefig(Path(output_path), dpi=300)
     plt.close(figure)
 
 
 def plot_task_metric(
-    values,
-    ylabel,
-    title,
-    output_path,
-    *,
-    connect_points=False,
-    point_labels=None,
-    label_format="{:.2f}%",
-    percentage_axis=False,
-):
-    """Plot a task-level metric with optional connecting lines and labels."""
+    values: list[float],
+    ylabel: str,
+    title: str,
+    output_path: Path | str,
+    connect_points: bool = True,
+    percentage_axis: bool = False,
+    point_labels: list[float] | None = None,
+    label_format: str = "{:.2f}",
+    variance: list[float] | None = None,
+    variance_as_errorbar: bool = False,
+) -> None:
+    """Disegna l'andamento di una metrica per task (BWT o Bit-flips)."""
     figure, axis = plt.subplots(figsize=(8, 5))
-    task_ids = list(range(1, len(values) + 1))
-    if connect_points:
-        axis.plot(task_ids, values, color="tab:blue", linewidth=1.2, zorder=1)
-    axis.scatter(task_ids, values, color="tab:blue", zorder=2)
-    if point_labels is not None:
-        for task_id, value, label in zip(task_ids, values, point_labels):
+    x = list(range(1, len(values) + 1)) if len(values) > 1 else [1]
+
+    if connect_points and len(values) > 1:
+        axis.plot(x, values, marker="o", color="#1f77b4", linewidth=2, markersize=6)
+    else:
+        axis.scatter(x, values, color="#1f77b4", s=50)
+    if variance is not None:
+        values_array = np.asarray(values, dtype=float)
+        variance_array = np.asarray(variance, dtype=float)
+        axis.fill_between(
+            x,
+            values_array - variance_array,
+            values_array + variance_array,
+            color="#1f77b4",
+            alpha=0.2,
+        )
+
+    if point_labels:
+        for xi, yi, lbl in zip(x, values, point_labels):
             axis.annotate(
-                label_format.format(label),
-                (task_id, value),
-                xytext=(0, 8),
+                label_format.format(lbl),
+                (xi, yi),
                 textcoords="offset points",
+                xytext=(0, 8),
                 ha="center",
-                fontsize=8,
+                fontsize=9,
             )
-    axis.set_xlabel("Task")
-    axis.set_ylabel(ylabel)
+
+    axis.set_title(title, fontsize=13)
+    axis.set_xlabel("Task" if len(values) > 1 else "", fontsize=11)
+    axis.set_ylabel(ylabel, fontsize=11)
+    axis.grid(True, linestyle="--", alpha=0.5)
+    axis.set_xticks(x)
+
     if percentage_axis:
-        axis.yaxis.set_major_formatter(PercentFormatter(xmax=1.0))
-    axis.set_xticks(task_ids)
-    axis.grid(True, alpha=0.3)
+        axis.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{y:.0f}%"))
+
     figure.tight_layout()
-    figure.savefig(Path(output_path), dpi=160)
+    figure.savefig(Path(output_path), dpi=300)
     plt.close(figure)
 
 
-def plot_accuracy_vs_classes(accuracies, classes, output_path):
+def plot_accuracy_vs_classes(accuracies, classes, output_path, variance=None):
     """Plot class-incremental accuracy as the number of seen classes grows."""
     figure, axis = plt.subplots(figsize=(8, 5))
-    axis.plot(classes, accuracies, marker="o", color="tab:blue")
-    axis.set_xlabel("Number of seen classes")
-    axis.set_ylabel("Accuracy (%)")
+    axis.plot(
+        classes,
+        accuracies,
+        marker="o",
+        color="tab:blue",
+        linewidth=2,
+        label="Media",
+    )
+    if variance is not None:
+        mean = np.asarray(accuracies, dtype=float)
+        spread = np.asarray(variance, dtype=float)
+        axis.fill_between(
+            classes,
+            mean - spread,
+            mean + spread,
+            alpha=0.2,
+            color="tab:blue",
+        )
+    axis.set_xlabel("Number of seen classes", fontsize=11)
+    axis.set_ylabel("Accuracy (%)", fontsize=11)
     axis.set_ylim(0.0, 100.0)
     axis.set_xticks(classes)
     axis.grid(True, alpha=0.3)
+    axis.legend(loc="lower right")
     figure.tight_layout()
-    figure.savefig(Path(output_path), dpi=160)
+    figure.savefig(Path(output_path), dpi=300)
     plt.close(figure)
 
 
@@ -108,14 +168,17 @@ def plot_matrix(
     ylabel,
     cmap="Blues",
     show_ticks=True,
-    vmin=None,
-    vmax=None,
+    vmin=0.0,
+    vmax=1.0,
+    annotations=None,
 ):
-    """Plot and save a matrix, leaving missing values empty."""
+    """Plot and save a matrix with values annotated in each valid cell."""
     values = np.asarray(matrix, dtype=float)
-    figure, axis = plt.subplots(figsize=(10, 8))
+    figure, axis = plt.subplots(figsize=(9, 7))
+
+    masked_values = np.ma.masked_invalid(values)
     image = axis.imshow(
-        np.ma.masked_invalid(values),
+        masked_values,
         cmap=cmap,
         aspect="auto",
         interpolation="nearest",
@@ -123,8 +186,36 @@ def plot_matrix(
         vmax=vmax,
     )
     figure.colorbar(image, ax=axis)
-    axis.set_xlabel(xlabel)
-    axis.set_ylabel(ylabel)
+
+    # Scrive il valore numerico al centro di ogni cella valida (visibile)
+    threshold = (vmin + vmax) / 2.0 if (vmin is not None and vmax is not None) else 0.5
+    for i in range(values.shape[0]):
+        for j in range(values.shape[1]):
+            val = values[i, j]
+            if not np.isnan(val):
+                # Contrasto del testo: bianco su sfondi scuri, nero su chiari
+                color = "white" if val > threshold else "black"
+                annotation = (
+                    annotations[i][j]
+                    if annotations is not None
+                    else f"{val:.2f}"
+                )
+                axis.text(
+                    j,
+                    i,
+                    annotation,
+                    ha="center",
+                    va="center",
+                    color=color,
+                    fontsize=8,
+                    linespacing=0.8,
+                )
+
+    if title:
+        axis.set_title(title, fontsize=13, pad=12)
+    axis.set_xlabel(xlabel, fontsize=11)
+    axis.set_ylabel(ylabel, fontsize=11)
+
     if show_ticks:
         axis.set_xticks(range(values.shape[1]))
         axis.set_yticks(range(values.shape[0]))
@@ -133,6 +224,7 @@ def plot_matrix(
     else:
         axis.set_xticks([])
         axis.set_yticks([])
+
     figure.tight_layout()
-    figure.savefig(Path(output_path), dpi=160)
+    figure.savefig(Path(output_path), dpi=300)
     plt.close(figure)
