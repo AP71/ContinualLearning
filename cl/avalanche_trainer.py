@@ -41,7 +41,7 @@ MODEL_NAME = "resneta"
 OUTPUT_ROOT = ROOT / "cl" / "results"
 BATCH_SIZE = 256
 WORKERS = 0
-EPOCHS_PER_TASK = 30
+EPOCHS_PER_TASK = 40
 LEARNING_RATE = 1e-3
 WEIGHT_DECAY = 0.0
 SEEDS = (42, 2023, 3047)
@@ -63,11 +63,12 @@ def run_sequential_avalanche(
         )
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    scenario = create_benchmark(DATASET_PATH, SEED)
+    scenario, val_dataset = create_benchmark(DATASET_PATH, seed=SEED, is_joint=False)
     num_tasks = scenario.n_experiences
     model = create_model(initialization, DEVICE, LOGGER, CHECKPOINT_PATH, ROOT)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
 
+    # Scheduler settato per il singolo Task (Reset a ogni nuovo task)
     scheduler = torch.optim.lr_scheduler.MultiStepLR(
         optimizer,
         milestones=[20, 25],
@@ -88,7 +89,9 @@ def run_sequential_avalanche(
         LOGGER=LOGGER,
     )
 
-    # Plugin che monitora epoca per epoca la loss e l'accuratezza di ogni task visto
+    # NOTA METODOLOGICA: L'EpochTracker traccia il Test Set per scopi diagnostici.
+    # Nei run definitivi per la tesi, potresti commentarlo per velocizzare l'addestramento,
+    # dato che l'Early Stopping qui non è attivo.
     epoch_tracker = EpochTrackerPlugin(
         test_stream=scenario.test_stream,
         num_tasks=num_tasks,
@@ -96,7 +99,6 @@ def run_sequential_avalanche(
         batch_size=BATCH_SIZE,
         num_workers=WORKERS,
     )
-
 
     loggers = [
         InteractiveLogger(),
@@ -215,4 +217,4 @@ def run_three_seeds(initialization: str = "checkpoint") -> Path:
 
 
 if __name__ == "__main__":
-    run_three_seeds("checkpoint")
+    run_three_seeds("random")

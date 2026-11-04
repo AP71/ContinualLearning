@@ -112,7 +112,62 @@ def _save_history(values: list[Any], path: Path, title: str) -> dict[str, Any]:
     return stats
 
 
-def _save_matrix(values: list[Any], path: Path, title: str) -> dict[str, Any]:
+def _save_joint_history(values: list[Any], path: Path) -> dict[str, Any]:
+    stats = _statistics(values)
+    mean = np.asarray(stats["mean"], dtype=float).reshape(-1)
+    variance = np.asarray(stats["variance"], dtype=float).reshape(-1)
+    plot_accuracy_history(
+        [mean.tolist()],
+        path,
+        title=None,
+        variance_history=[np.sqrt(np.maximum(variance, 0.0)).tolist()],
+        show_markers=False,
+        legend_labels=["Mean ± variance"],
+    )
+    return stats
+
+
+def _save_joint_point(
+    values: list[Any],
+    path: Path,
+    ylabel: str,
+    labels: list[Any],
+    *,
+    scale: float = 1.0,
+    label_format: str = "{:.2f}%",
+    variance_values: list[Any] | None = None,
+) -> dict[str, Any]:
+    stats = _statistics(values)
+    mean = np.asarray(stats["mean"], dtype=float).reshape(-1) * scale
+    spread = None
+    if variance_values is not None:
+        spread = np.sqrt(
+            np.maximum(
+                np.asarray(_statistics(variance_values)["variance"], dtype=float),
+                0.0,
+            )
+        ).reshape(-1) * scale
+    plot_task_metric(
+        mean.tolist(),
+        ylabel,
+        "",
+        path,
+        connect_points=False,
+        point_labels=(np.asarray(labels, dtype=float).reshape(-1)).tolist(),
+        label_format=label_format,
+        variance=None if spread is None else spread.tolist(),
+        variance_as_errorbar=True,
+    )
+    return stats
+
+
+def _save_matrix(
+    values: list[Any],
+    path: Path,
+    title: str,
+    *,
+    show_values: bool = True,
+) -> dict[str, Any]:
     stats = _statistics(values)
     mean = np.asarray(stats["mean"], dtype=float)
     variance = np.asarray(stats["variance"], dtype=float)
@@ -132,8 +187,26 @@ def _save_matrix(values: list[Any], path: Path, title: str) -> dict[str, Any]:
         xlabel="Evaluated task",
         ylabel="Training task",
         annotations=annotations,
+        show_values=show_values,
+        show_tick_labels=show_values,
     )
     return stats
+
+
+def _normalize_confusion_matrices(values: list[Any]) -> list[list[list[float]]]:
+    """Convert per-class confusion counts into row-normalized accuracies."""
+    normalized = []
+    for value in values:
+        matrix = np.asarray(value, dtype=float)
+        row_totals = matrix.sum(axis=1, keepdims=True)
+        normalized_matrix = np.divide(
+            matrix,
+            row_totals,
+            out=np.zeros_like(matrix),
+            where=row_totals > 0,
+        )
+        normalized.append(normalized_matrix.tolist())
+    return normalized
 
 
 def analyze_results(results_path: Path) -> dict[str, Any]:
@@ -196,14 +269,51 @@ def analyze_results(results_path: Path) -> dict[str, Any]:
                 "Accuracy per epoch",
             )
     elif "joint" in experiment_type:
-        values = collect("final_accuracy")
+        values = collect("accuracy_history")
         if values:
-            _save_curve(
+            _save_joint_history(
+                values,
+                output_dir / "accuracy_per_epoch.png",
+            )
+
+        values = collect("final_accuracy")
+        if not values:
+            values = collect("final_accuracy_on_test")
+        if values:
+            final_stats = _statistics(values)
+            final_mean = float(np.asarray(final_stats["mean"]).reshape(-1)[0])
+            _save_joint_point(
                 values,
                 output_dir / "final_accuracy.png",
-                "Final joint-training accuracy",
-                "Accuracy",
-                percentage=True,
+                "Accuracy (%)",
+                [final_mean * 100.0],
+                scale=100.0,
+                variance_values=values,
+            )
+
+        values = collect("confusion_matrix")
+        if values:
+            _save_matrix(
+                _normalize_confusion_matrices(values),
+                output_dir / "confusion_matrix.png",
+                "",
+                show_values=False,
+            )
+
+        values = collect("total_bit_flips")
+        percentages = collect("bit_flip_percentage")
+        if values and percentages:
+            percentage_stats = _statistics(percentages)
+            mean_percentage = float(
+                np.asarray(percentage_stats["mean"]).reshape(-1)[0]
+            )
+            _save_joint_point(
+                values,
+                output_dir / "bitflips_total.png",
+                "Flipped bits",
+                [mean_percentage],
+                label_format="{:.4f}%",
+                variance_values=values,
             )
 
     else:
@@ -222,4 +332,4 @@ def analyze_results(results_path: Path) -> dict[str, Any]:
 
 
 if __name__ == "__main__":
-    analyze_results(Path("C:\\Users\\flypi\\Desktop\\TesiMagistrale\\ContinualLearning\\cl\\results\\cifar100_avalanche_naive_checkpoint_resneta_3seeds\\results.json"))
+    analyze_results(Path(r"C:\Users\flypi\Desktop\TesiMagistrale\ContinualLearning\cl\results\cifar100_avalanche_naive_random_resneta_3seeds\results.json"))

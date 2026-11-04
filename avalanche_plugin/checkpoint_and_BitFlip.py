@@ -15,6 +15,8 @@ class CheckpointAndBitFlipPlugin(SupervisedPlugin):
         self.compare_dir.mkdir(parents=True, exist_ok=True)
         self.prev_checkpoint: Path | None = None
         self.bit_flips: list[int] = []
+        self.bit_flip_percentages: list[float] = []
+        self.total_binary_bits: int | None = None
         self.LOGGER = LOGGER
 
     def before_training(self, strategy, **kwargs):
@@ -36,7 +38,9 @@ class CheckpointAndBitFlipPlugin(SupervisedPlugin):
 
         flips = comparison["binary_summary"]["bit_flips"]
         pct = comparison["binary_summary"]["bit_flip_percentage"]
+        self.total_binary_bits = comparison["binary_summary"]["total_bits"]
         self.bit_flips.append(flips)
+        self.bit_flip_percentages.append(pct)
         if self.LOGGER:
             self.LOGGER.info("Task %d completed - Bit Flips: %d (%.4f%%)", exp_id + 1, flips, pct)
 

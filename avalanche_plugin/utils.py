@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from avalanche.benchmarks import nc_benchmark
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 
 from Network.ReActNet_A_Qaw import Reactnet
@@ -53,7 +53,8 @@ def evaluate_confusion_matrix(model: nn.Module, full_test_dataset, device: torch
     matrix = np.zeros((100, 100), dtype=np.int64)
     model.eval()
     with torch.no_grad():
-        for images, labels in loader:
+        for batch in loader:
+            images, labels = batch[0], batch[1]
             images = images.to(device, non_blocking=True)
             preds = model(images).argmax(1).cpu()
             indices = labels * 100 + preds
@@ -97,7 +98,27 @@ def create_model(initialization: str, device: torch.device, log: logging.Logger,
         log.info("Loaded %d compatible tensors from %s", len(compatible_state), checkpoint)
     return model.to(device)
 
-def create_benchmark(dataset_path: Path, seed: int):
+class SubsetWithTargets(Subset):
+    """
+    Wrapper per Subset di PyTorch.
+    Avalanche richiede esplicitamente che il dataset esponga l'attributo '.targets'
+    per poter dividere correttamente le classi nelle experience.
+    """
+    def __init__(self, dataset, indices):
+        super().__init__(dataset, indices)
+        self.targets = [dataset.targets[i] for i in indices]
+
+
+def create_benchmark(dataset_path: Path, seed: int, is_joint: bool = False):
+    """
+    Crea il benchmark CIFAR-100 per Avalanche, estraendo un Validation Set
+    perfettamente bilanciato (50 immagini per classe).
+
+    Args:
+        dataset_path: Percorso del dataset CIFAR-100.
+        seed: Seme per la riproducibilità dello split.
+        is_joint: Se True, crea 1 singola experience (Joint). Se False, 10 experience (Sequential).
+    """
     train_transform = transforms.Compose([
         transforms.Pad(4, padding_mode="reflect"),
         transforms.RandomHorizontalFlip(),
@@ -105,19 +126,44 @@ def create_benchmark(dataset_path: Path, seed: int):
         transforms.ToTensor(),
         transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
     ])
+
     test_transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
     ])
 
-    train_data = datasets.CIFAR100(dataset_path, train=True, download=False, transform=train_transform)
+    # 1. Carica i dataset originali
+    # IMPORTANTE: Il Validation Set deve usare il test_transform (nessuna augmentation)
+    full_train_data = datasets.CIFAR100(dataset_path, train=True, download=False, transform=train_transform)
+    full_val_data_base = datasets.CIFAR100(dataset_path, train=True, download=False, transform=test_transform)
     test_data = datasets.CIFAR100(dataset_path, train=False, download=False, transform=test_transform)
 
-    return nc_benchmark(
-        train_dataset=train_data,
+    # 2. Split stratificato: esattamente 50 immagini per classe per il Validation
+    targets = np.array(full_train_data.targets)
+    train_indices = []
+    val_indices = []
+
+    rng = np.random.default_rng(seed)
+    for c in range(100):
+        c_idx = np.where(targets == c)[0]
+        rng.shuffle(c_idx)  # Usa il seed per garantire riproducibilità
+        val_indices.extend(c_idx[:50])  # Le prime 50 alla validazione
+        train_indices.extend(c_idx[50:])  # Le restanti 450 al training
+
+    # 3. Applica i wrapper per mantenere i targets visibili ad Avalanche
+    train_subset = SubsetWithTargets(full_train_data, train_indices)
+    val_subset = SubsetWithTargets(full_val_data_base, val_indices)
+
+    # 4. Creazione del benchmark Avalanche
+    n_experiences = 1 if is_joint else 10
+
+    benchmark = nc_benchmark(
+        train_dataset=train_subset,
         test_dataset=test_data,
-        n_experiences=10,
+        n_experiences=n_experiences,
         task_labels=False,  # Class-incremental
-        shuffle=False,
+        shuffle=False,  # False mantiene l'ordine fisso dei task (Split CIFAR-100)
         seed=seed,
     )
+
+    return benchmark, val_subset

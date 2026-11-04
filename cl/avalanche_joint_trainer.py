@@ -4,16 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
-import random
 import sys
 from datetime import datetime
 from pathlib import Path
 
-import numpy as np
 import torch
 from torch import nn
-from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
 
 # Avalanche imports
 from avalanche.benchmarks import nc_benchmark
@@ -44,7 +40,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from Network.ReActNet_A_Qaw import Reactnet
 from avalanche_plugin.checkpoint_and_BitFlip import CheckpointAndBitFlipPlugin
 
 DATASET_PATH = Path(r"F:/Dataset/CIFAR-100/")
@@ -56,7 +51,7 @@ WORKERS = 0
 
 JOINT_EPOCHS = 400
 JOINT_EARLY_STOPPING_ENABLED = True
-JOINT_EARLY_STOPPING_PATIENCE = 5
+JOINT_EARLY_STOPPING_PATIENCE = 15  # Alzato leggermente per tollerare il rumore della BNN
 JOINT_EARLY_STOPPING_MIN_DELTA = 1e-3
 LEARNING_RATE = 1e-3
 WEIGHT_DECAY = 0.0
@@ -79,19 +74,47 @@ def extract_validation_accuracy(metrics: dict[str, float]) -> float:
     return float(metrics[matching_keys[-1]])
 
 
+def extract_validation_accuracy_history(
+    metrics_history: dict[str, tuple[list[int], list[float]]],
+) -> tuple[list[int], list[float]]:
+    """Extract validation-stream accuracy emitted after each training epoch."""
+    metric_key = "Top1_Acc_Stream/eval_phase/test_stream"
+    matching_keys = sorted(
+        key for key in metrics_history if key.startswith(metric_key)
+    )
+    if not matching_keys:
+        raise KeyError(
+            "Avalanche did not collect validation accuracy history for test_stream. "
+            f"Available metrics: {sorted(metrics_history)}"
+        )
+
+    _, values = metrics_history[matching_keys[0]]
+    values = [float(value) for value in values]
+    return list(range(1, len(values) + 1)), values
+
+
 def run_joint_avalanche(initialization: str = "checkpoint"):
     set_seed(SEED)
     output_dir = OUTPUT_ROOT / f"cifar100_avalanche_JOINT_{initialization}_{MODEL_NAME}_seed{SEED}_{datetime.now():%Y%m%d_%H%M%S}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    scenario = create_benchmark(DATASET_PATH, SEED)
+    # 1. Creazione del benchmark con Validation Set estratto dal Train Set
+    scenario, val_dataset = create_benchmark(DATASET_PATH, seed=SEED, is_joint=True)
+
+    # 2. Avvolgiamo il val_dataset in un finto benchmark di Avalanche per passarlo ad eval_streams
+    val_scenario = nc_benchmark(
+        train_dataset=val_dataset,
+        test_dataset=val_dataset,
+        n_experiences=1,
+        task_labels=False,
+        shuffle=False
+    )
+
     model = create_model(initialization, DEVICE, LOGGER, CHECKPOINT_PATH, ROOT)
-
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-
     scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[150, 250, 320], gamma=0.1)
 
-    # 3. Wrapping dello Scheduler nel plugin di Avalanche
+    # Wrapping dello Scheduler nel plugin di Avalanche
     scheduler_plugin = LRSchedulerPlugin(
         scheduler,
         step_granularity='epoch'
@@ -104,7 +127,6 @@ def run_joint_avalanche(initialization: str = "checkpoint"):
         LOGGER=LOGGER,
     )
 
-    # Loggers e metriche nativi di Avalanche
     loggers = [
         InteractiveLogger(),
         TextLogger(open(output_dir / "training_log.txt", "w", encoding="utf-8")),
@@ -116,14 +138,13 @@ def run_joint_avalanche(initialization: str = "checkpoint"):
         loggers=loggers
     )
 
-    # Inizializzazione della strategia JointTraining
     print(f"\n=======================================================")
     print(f" Inizializzazione Avalanche Joint Training ({JOINT_EPOCHS} Epoche)")
     print(f"=======================================================")
 
     early_stopping_plugin = EarlyStoppingPlugin(
         patience=JOINT_EARLY_STOPPING_PATIENCE,
-        val_stream_name="test_stream",
+        val_stream_name="test_stream",  # Questo punterà al nostro val_scenario.test_stream
         metric_name="Top1_Acc_Stream",
         mode="max",
         peval_mode="epoch",
@@ -147,12 +168,14 @@ def run_joint_avalanche(initialization: str = "checkpoint"):
     if not JOINT_EARLY_STOPPING_ENABLED:
         raise ValueError("EarlyStoppingPlugin must be enabled for joint training.")
 
-    # EvaluationPlugin evaluates test_stream every epoch; EarlyStoppingPlugin
-    # restores the best model and stops the strategy after the patience limit.
     strategy.train(
         scenario.train_stream,
-        eval_streams=[scenario.test_stream],
+        eval_streams=[val_scenario.test_stream],
         num_workers=WORKERS,
+    )
+
+    validation_epochs, validation_accuracy_history = (
+        extract_validation_accuracy_history(eval_plugin.get_all_metrics())
     )
     epochs_completed = strategy.clock.train_exp_epochs
     best_accuracy = early_stopping_plugin.best_val
@@ -162,12 +185,14 @@ def run_joint_avalanche(initialization: str = "checkpoint"):
         epochs_completed - best_epoch if best_epoch is not None else None
     )
 
-    # Valutazione Finale sull'intero test set
-    print("\n>> Addestramento completato. Avvio valutazione finale...")
+    # Valutazione Finale sull'INTERO VERO TEST SET (10.000 immagini)
+    print("\n>> Addestramento completato. Avvio valutazione finale sul VERO Test Set...")
     final_metrics = strategy.eval(scenario.test_stream)
+    final_accuracy = extract_validation_accuracy(final_metrics)
 
     print("\n>> Calcolo Confusion Matrix finale...")
-    conf_matrix = evaluate_confusion_matrix(strategy.model, scenario.test_stream[0].dataset, DEVICE, batch_size=BATCH_SIZE, num_workers=WORKERS)
+    conf_matrix = evaluate_confusion_matrix(strategy.model, scenario.test_stream[0].dataset, DEVICE,
+                                            batch_size=BATCH_SIZE, num_workers=WORKERS)
 
     # Salvataggio metriche di base
     results = {
@@ -178,7 +203,7 @@ def run_joint_avalanche(initialization: str = "checkpoint"):
         "seed": SEED,
         "total_epochs": JOINT_EPOCHS,
         "epochs_completed": epochs_completed,
-        "best_accuracy": best_accuracy,
+        "best_accuracy_on_val": best_accuracy,
         "best_epoch": best_epoch,
         "early_stopping": {
             "enabled": JOINT_EARLY_STOPPING_ENABLED,
@@ -188,7 +213,22 @@ def run_joint_avalanche(initialization: str = "checkpoint"):
             "stopped_early": stopped_early,
             "epochs_without_improvement": epochs_without_improvement,
         },
-        "final_accuracy": extract_validation_accuracy(final_metrics),
+        "final_accuracy": final_accuracy,
+        "final_accuracy_on_test": final_accuracy,
+        "final_accuracy_percent": 100.0 * final_accuracy,
+        "accuracy_history": validation_accuracy_history,
+        "accuracy_epochs": validation_epochs,
+        "bit_flips": list(custom_plugin.bit_flips),
+        "total_bit_flips": int(sum(custom_plugin.bit_flips)),
+        "bit_flip_percentages": list(custom_plugin.bit_flip_percentages),
+        "total_binary_bits": custom_plugin.total_binary_bits,
+        "bit_flip_percentage": (
+            100.0 * sum(custom_plugin.bit_flips) / (
+                custom_plugin.total_binary_bits * len(custom_plugin.bit_flips)
+            )
+            if custom_plugin.total_binary_bits and custom_plugin.bit_flips
+            else 0.0
+        ),
         "confusion_matrix": conf_matrix.tolist()
     }
 
@@ -224,4 +264,4 @@ def run_three_seeds(initialization: str = "checkpoint") -> Path:
 
 
 if __name__ == "__main__":
-    run_three_seeds("checkpoint")
+    run_three_seeds("random")

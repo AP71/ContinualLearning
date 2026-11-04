@@ -30,6 +30,7 @@ def plot_accuracy_history(
     epoch_points=None,
     variance_history=None,
     show_markers=True,
+    legend_labels=None,
 ):
     """Plot one accuracy curve for every task over global training epochs."""
     figure, axis = plt.subplots(figsize=(10, 6))
@@ -48,7 +49,11 @@ def plot_accuracy_history(
             values,
             marker=markers[task_id % len(markers)] if show_markers else None,
             markersize=4 if show_markers else 0,
-            label=f"Task {task_id + 1}",
+            label=(
+                legend_labels[task_id]
+                if legend_labels is not None
+                else f"Task {task_id + 1}"
+            ),
         )
         if variance_history is not None:
             variance = np.asarray(variance_history[task_id], dtype=float)
@@ -91,7 +96,17 @@ def plot_task_metric(
         axis.plot(x, values, marker="o", color="#1f77b4", linewidth=2, markersize=6)
     else:
         axis.scatter(x, values, color="#1f77b4", s=50)
-    if variance is not None:
+    if variance is not None and variance_as_errorbar:
+        axis.errorbar(
+            x,
+            values,
+            yerr=np.asarray(variance, dtype=float),
+            fmt="none",
+            ecolor="#1f77b4",
+            capsize=5,
+            linewidth=1.5,
+        )
+    elif variance is not None:
         values_array = np.asarray(values, dtype=float)
         variance_array = np.asarray(variance, dtype=float)
         axis.fill_between(
@@ -136,7 +151,7 @@ def plot_accuracy_vs_classes(accuracies, classes, output_path, variance=None):
         marker="o",
         color="tab:blue",
         linewidth=2,
-        label="Media",
+        label="Mean",
     )
     if variance is not None:
         mean = np.asarray(accuracies, dtype=float)
@@ -153,7 +168,7 @@ def plot_accuracy_vs_classes(accuracies, classes, output_path, variance=None):
     axis.set_ylim(0.0, 100.0)
     axis.set_xticks(classes)
     axis.grid(True, alpha=0.3)
-    axis.legend(loc="lower right")
+    axis.legend(loc="upper right")
     figure.tight_layout()
     figure.savefig(Path(output_path), dpi=300)
     plt.close(figure)
@@ -171,6 +186,8 @@ def plot_matrix(
     vmin=0.0,
     vmax=1.0,
     annotations=None,
+    show_values=True,
+    show_tick_labels=True,
 ):
     """Plot and save a matrix with values annotated in each valid cell."""
     values = np.asarray(matrix, dtype=float)
@@ -189,27 +206,28 @@ def plot_matrix(
 
     # Scrive il valore numerico al centro di ogni cella valida (visibile)
     threshold = (vmin + vmax) / 2.0 if (vmin is not None and vmax is not None) else 0.5
-    for i in range(values.shape[0]):
-        for j in range(values.shape[1]):
-            val = values[i, j]
-            if not np.isnan(val):
-                # Contrasto del testo: bianco su sfondi scuri, nero su chiari
-                color = "white" if val > threshold else "black"
-                annotation = (
-                    annotations[i][j]
-                    if annotations is not None
-                    else f"{val:.2f}"
-                )
-                axis.text(
-                    j,
-                    i,
-                    annotation,
-                    ha="center",
-                    va="center",
-                    color=color,
-                    fontsize=8,
-                    linespacing=0.8,
-                )
+    if show_values:
+        for i in range(values.shape[0]):
+            for j in range(values.shape[1]):
+                val = values[i, j]
+                if not np.isnan(val):
+                    # Contrasto del testo: bianco su sfondi scuri, nero su chiari
+                    color = "white" if val > threshold else "black"
+                    annotation = (
+                        annotations[i][j]
+                        if annotations is not None
+                        else f"{val:.2f}"
+                    )
+                    axis.text(
+                        j,
+                        i,
+                        annotation,
+                        ha="center",
+                        va="center",
+                        color=color,
+                        fontsize=8,
+                        linespacing=0.8,
+                    )
 
     if title:
         axis.set_title(title, fontsize=13, pad=12)
@@ -219,8 +237,12 @@ def plot_matrix(
     if show_ticks:
         axis.set_xticks(range(values.shape[1]))
         axis.set_yticks(range(values.shape[0]))
-        axis.set_xticklabels(range(1, values.shape[1] + 1))
-        axis.set_yticklabels(range(1, values.shape[0] + 1))
+        if show_tick_labels:
+            axis.set_xticklabels(range(1, values.shape[1] + 1))
+            axis.set_yticklabels(range(1, values.shape[0] + 1))
+        else:
+            axis.set_xticklabels([])
+            axis.set_yticklabels([])
     else:
         axis.set_xticks([])
         axis.set_yticks([])

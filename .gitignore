@@ -4,3 +4,5 @@
 Weights/
 inference/models/
 .idea/
+*.png
+*.json
