@@ -495,18 +495,18 @@ def _network_order(
     return ordered
 
 
-EXPERIMENTS_DIR = ROOT / "cl" / "results" / "cifar100_avalanche_naive_checkpoint_resneta_3seeds"
+EXPERIMENTS_DIR = ROOT / "cl" / "results" / "cifar100_avalanche_Freezing_checkpoint_resneta_3seeds"
 DATASET_PATH = DEFAULT_DATASET_PATH
 OUTPUT_PATH: Path | None = None
 BATCH_SIZE = 256
 NUM_WORKERS = 0
 
 if __name__ == "__main__":
-    # analyze_forgetting(
-    #     EXPERIMENTS_DIR,
-    #     DATASET_PATH,
-    #     output_path=OUTPUT_PATH,
-    #     batch_size=BATCH_SIZE,
-    #     num_workers=NUM_WORKERS,
-    # )
+    analyze_forgetting(
+        EXPERIMENTS_DIR,
+        DATASET_PATH,
+        output_path=OUTPUT_PATH,
+        batch_size=BATCH_SIZE,
+        num_workers=NUM_WORKERS,
+    )
     plot_forgetting_results(EXPERIMENTS_DIR / "forgetting.json")
