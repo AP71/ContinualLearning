@@ -13,7 +13,7 @@ from torch import nn
 from torchvision import datasets, transforms
 
 # Avalanche imports per le strategie di Continual Learning
-from avalanche.training import Naive, Replay, LwF, EWC, GEM, AGEM
+from avalanche.training import Naive, Replay, LwF, EWC
 from avalanche.logging import InteractiveLogger, TextLogger
 from avalanche.training.plugins import EvaluationPlugin, LRSchedulerPlugin
 
@@ -36,13 +36,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from avalanche_plugin.checkpoint_and_BitFlip import CheckpointAndBitFlipPlugin
+from avalanche_plugin.metaplasticity import MetaplasticityPlugin
 from avalanche_plugin.results import save_avalanche_sequential_results
 
 # ==============================================================================
 # STRATEGY CONFIGURATION - Scegli qui l'esperimento da eseguire
 # ==============================================================================
-# Opzioni supportate: "Freezing", "Replay", "LwF", "EWC", "GEM", "AGEM"
-STRATEGY_NAME = "Freezing"
+# Opzioni supportate: "Freezing", "Replay", "LwF", "EWC", "Metaplasticity"
+STRATEGY_NAME = "Metaplasticity"
 
 # Hyper-parameters specifici per le strategie CL (da tunare per la BNN)
 REPLAY_MEM_SIZE = 2000  # Numero totale di immagini salvate nel buffer
@@ -51,6 +52,8 @@ LWF_TEMPERATURE = 2.0  # Temperatura per ammorbidire i logit
 EWC_LAMBDA = 0.4  # Forza della penalità basata sull'informazione di Fisher
 GEM_PATTERNS_PER_EXP = 200  # Pattern salvati per esperienza per GEM/AGEM
 AGEM_SAMPLE_SIZE = 64  # Batch size del replay in AGEM
+METAPLASTICITY_M = 1.5  # Forza di consolidamento metaplastico m (Laborieux et al.)
+METAPLASTICITY_CLASSIFIER = "fc"  # Nome del classificatore finale da proteggere
 # ==============================================================================
 
 DATASET_PATH = Path(r"F:/Dataset/CIFAR-100/")
@@ -98,7 +101,7 @@ def run_sequential_avalanche(
         trainable_params = filter(lambda p: p.requires_grad, model.parameters())
         optimizer = torch.optim.Adam(trainable_params, lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     else:
-        # Per tutte le altre strategie (Replay, LwF, EWC...), addestriamo tutta la rete
+        # Per tutte le altre strategie (Replay, LwF, EWC, Metaplasticity...), addestriamo tutta la rete
         optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     # --------------------------------------------------------------------------
 
@@ -164,10 +167,13 @@ def run_sequential_avalanche(
         strategy = LwF(alpha=LWF_ALPHA, temperature=LWF_TEMPERATURE, **common_args)
     elif STRATEGY_NAME == "EWC":
         strategy = EWC(ewc_lambda=EWC_LAMBDA, **common_args)
-    elif STRATEGY_NAME == "GEM":
-        strategy = GEM(patterns_per_exp=GEM_PATTERNS_PER_EXP, memory_strength=0.5, **common_args)
-    elif STRATEGY_NAME == "AGEM":
-        strategy = AGEM(patterns_per_exp=GEM_PATTERNS_PER_EXP, sample_size=AGEM_SAMPLE_SIZE, **common_args)
+    elif STRATEGY_NAME == "Metaplasticity":
+        metaplasticity_plugin = MetaplasticityPlugin(
+            m=METAPLASTICITY_M,
+            classifier_name=METAPLASTICITY_CLASSIFIER,
+        )
+        common_args["plugins"] = [metaplasticity_plugin] + common_args["plugins"]
+        strategy = Naive(**common_args)
     else:
         raise ValueError(f"Strategia sconosciuta: {STRATEGY_NAME}")
     # --------------------------------------------------------------------------

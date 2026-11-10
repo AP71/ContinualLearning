@@ -332,4 +332,4 @@ def analyze_results(results_path: Path) -> dict[str, Any]:
 
 
 if __name__ == "__main__":
-    analyze_results(Path(r"/cl/results/cifar100_avalanche_Freezing_checkpoint_resneta_3seeds/results.json"))
+    analyze_results(Path(r"F:\TesiMagistrale\ContinualLearning\cl\results\cifar100_avalanche_Metaplasticity_checkpoint_resneta_3seeds\results.json"))

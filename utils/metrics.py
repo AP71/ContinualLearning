@@ -70,7 +70,6 @@ def plot_accuracy_history(
     axis.set_xlim(left=1)
     axis.set_ylim(0.0, 1.0)
     axis.grid(True, alpha=0.3)
-    axis.legend(ncol=2, loc="lower right")
     figure.tight_layout()
     figure.savefig(Path(output_path), dpi=300)
     plt.close(figure)

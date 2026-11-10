@@ -495,7 +495,7 @@ def _network_order(
     return ordered
 
 
-EXPERIMENTS_DIR = ROOT / "cl" / "results" / "cifar100_avalanche_Freezing_checkpoint_resneta_3seeds"
+EXPERIMENTS_DIR = ROOT / "cl" / "results" / "cifar100_avalanche_Metaplasticity_checkpoint_resneta_3seeds"
 DATASET_PATH = DEFAULT_DATASET_PATH
 OUTPUT_PATH: Path | None = None
 BATCH_SIZE = 256
