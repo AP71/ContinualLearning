@@ -28,7 +28,7 @@ def plot_accuracy_history(
     task_start_epochs=None,
     title=None,
     epoch_points=None,
-    variance_history=None,
+    standard_deviation_history=None,
     show_markers=True,
     legend_labels=None,
 ):
@@ -55,12 +55,14 @@ def plot_accuracy_history(
                 else f"Task {task_id + 1}"
             ),
         )
-        if variance_history is not None:
-            variance = np.asarray(variance_history[task_id], dtype=float)
+        if standard_deviation_history is not None:
+            standard_deviation = np.asarray(
+                standard_deviation_history[task_id], dtype=float
+            )
             axis.fill_between(
                 epochs,
-                np.asarray(values, dtype=float) - variance,
-                np.asarray(values, dtype=float) + variance,
+                np.asarray(values, dtype=float) - standard_deviation,
+                np.asarray(values, dtype=float) + standard_deviation,
                 alpha=0.15,
             )
     if title:
@@ -84,8 +86,8 @@ def plot_task_metric(
     percentage_axis: bool = False,
     point_labels: list[float] | None = None,
     label_format: str = "{:.2f}",
-    variance: list[float] | None = None,
-    variance_as_errorbar: bool = False,
+    standard_deviation: list[float] | None = None,
+    standard_deviation_as_errorbar: bool = False,
 ) -> None:
     """Disegna l'andamento di una metrica per task (BWT o Bit-flips)."""
     figure, axis = plt.subplots(figsize=(8, 5))
@@ -95,23 +97,23 @@ def plot_task_metric(
         axis.plot(x, values, marker="o", color="#1f77b4", linewidth=2, markersize=6)
     else:
         axis.scatter(x, values, color="#1f77b4", s=50)
-    if variance is not None and variance_as_errorbar:
+    if standard_deviation is not None and standard_deviation_as_errorbar:
         axis.errorbar(
             x,
             values,
-            yerr=np.asarray(variance, dtype=float),
+            yerr=np.asarray(standard_deviation, dtype=float),
             fmt="none",
             ecolor="#1f77b4",
             capsize=5,
             linewidth=1.5,
         )
-    elif variance is not None:
+    elif standard_deviation is not None:
         values_array = np.asarray(values, dtype=float)
-        variance_array = np.asarray(variance, dtype=float)
+        standard_deviation_array = np.asarray(standard_deviation, dtype=float)
         axis.fill_between(
             x,
-            values_array - variance_array,
-            values_array + variance_array,
+            values_array - standard_deviation_array,
+            values_array + standard_deviation_array,
             color="#1f77b4",
             alpha=0.2,
         )
@@ -141,7 +143,9 @@ def plot_task_metric(
     plt.close(figure)
 
 
-def plot_accuracy_vs_classes(accuracies, classes, output_path, variance=None):
+def plot_accuracy_vs_classes(
+    accuracies, classes, output_path, standard_deviation=None
+):
     """Plot class-incremental accuracy as the number of seen classes grows."""
     figure, axis = plt.subplots(figsize=(8, 5))
     axis.plot(
@@ -152,9 +156,9 @@ def plot_accuracy_vs_classes(accuracies, classes, output_path, variance=None):
         linewidth=2,
         label="Mean",
     )
-    if variance is not None:
+    if standard_deviation is not None:
         mean = np.asarray(accuracies, dtype=float)
-        spread = np.asarray(variance, dtype=float)
+        spread = np.asarray(standard_deviation, dtype=float)
         axis.fill_between(
             classes,
             mean - spread,

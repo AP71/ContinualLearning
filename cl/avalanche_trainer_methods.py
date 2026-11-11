@@ -42,17 +42,18 @@ from avalanche_plugin.results import save_avalanche_sequential_results
 # ==============================================================================
 # STRATEGY CONFIGURATION - Scegli qui l'esperimento da eseguire
 # ==============================================================================
-# Opzioni supportate: "Freezing", "Replay", "LwF", "EWC", "Metaplasticity"
-STRATEGY_NAME = "Metaplasticity"
+# Opzioni supportate: "Freezing", "FreezingHead", "Replay", "LwF", "EWC", "Metaplasticity"
+STRATEGY_NAME = "FreezingHead"
 
 # Hyper-parameters specifici per le strategie CL (da tunare per la BNN)
 REPLAY_MEM_SIZE = 2000  # Numero totale di immagini salvate nel buffer
 LWF_ALPHA = 1.0  # Peso della loss di distillazione (abbassare se i bit non flippano)
 LWF_TEMPERATURE = 2.0  # Temperatura per ammorbidire i logit
-EWC_LAMBDA = 0.4  # Forza della penalità basata sull'informazione di Fisher
+EWC_LAMBDA = 1e5  # Forza della penalità basata sull'informazione di Fisher
 GEM_PATTERNS_PER_EXP = 200  # Pattern salvati per esperienza per GEM/AGEM
 AGEM_SAMPLE_SIZE = 64  # Batch size del replay in AGEM
-METAPLASTICITY_M = 1.5  # Forza di consolidamento metaplastico m (Laborieux et al.)
+METAPLASTICITY_M = None  # Forza di consolidamento metaplastico m (Laborieux et al.)
+METAPLASTICITY_VERSION = "v4" # Versione del plugin Metaplasticity da usare
 METAPLASTICITY_CLASSIFIER = "fc"  # Nome del classificatore finale da proteggere
 # ==============================================================================
 
@@ -81,6 +82,7 @@ def run_sequential_avalanche(
         output_dir = OUTPUT_ROOT / (
             f"cifar100_avalanche_{STRATEGY_NAME}_{initialization}_{MODEL_NAME}_"
             f"seed{SEED}_{datetime.now():%Y%m%d_%H%M%S}"
+            f"{METAPLASTICITY_VERSION if STRATEGY_NAME == 'Metaplasticity' else ''}"
         )
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -91,7 +93,7 @@ def run_sequential_avalanche(
     # --------------------------------------------------------------------------
     # GESTIONE OTTIMIZZATORE: Seleziona quali pesi addestrare
     # --------------------------------------------------------------------------
-    if STRATEGY_NAME == "Freezing":
+    if STRATEGY_NAME in ("Freezing", "FreezingHead"):
         print("\n>>> STRATEGIA FREEZING: Blocco tutti i layer tranne il classificatore finale ('fc')...")
         for name, param in model.named_parameters():
             if not name.startswith("fc"):
@@ -161,6 +163,13 @@ def run_sequential_avalanche(
 
     if STRATEGY_NAME == "Freezing":
         strategy = Naive(**common_args)
+    elif STRATEGY_NAME == "FreezingHead":
+        head_plugin = MetaplasticityPlugin(
+            version="v2",
+            classifier_name=METAPLASTICITY_CLASSIFIER,
+        )
+        common_args["plugins"] = [head_plugin] + common_args["plugins"]
+        strategy = Naive(**common_args)
     elif STRATEGY_NAME == "Replay":
         strategy = Replay(mem_size=REPLAY_MEM_SIZE, **common_args)
     elif STRATEGY_NAME == "LwF":
@@ -169,7 +178,7 @@ def run_sequential_avalanche(
         strategy = EWC(ewc_lambda=EWC_LAMBDA, **common_args)
     elif STRATEGY_NAME == "Metaplasticity":
         metaplasticity_plugin = MetaplasticityPlugin(
-            m=METAPLASTICITY_M,
+            version=METAPLASTICITY_VERSION,
             classifier_name=METAPLASTICITY_CLASSIFIER,
         )
         common_args["plugins"] = [metaplasticity_plugin] + common_args["plugins"]

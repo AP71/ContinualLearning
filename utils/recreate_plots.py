@@ -171,13 +171,16 @@ def recreate_joint_plots(results: dict[str, Any], output_dir: Path) -> list[Path
 
     bit_flips = results.get("bit_flips")
     if bit_flips is not None:
+        bit_flip_values = (
+            bit_flips if isinstance(bit_flips, list) else [bit_flips]
+        )
         generated.append(
             _plot_task_metric(
-                [bit_flips],
+                bit_flip_values,
                 "Bit flips",
                 "Final binary bit flips",
                 output_dir / "bitflips.png",
-                point_labels=[bit_flips],
+                point_labels=bit_flip_values,
                 label_format="{:.0f}",
             )
         )
@@ -277,10 +280,10 @@ def recreate_plots(results_path: Path) -> list[Path]:
     results = load_results(results_path)
     output_dir = results_path.parent
     protocol = str(results.get("protocol", "")).lower()
-    if "joint" in protocol or "accuracy_epochs" in results:
-        return recreate_joint_plots(results, output_dir)
     if "standard_class_incremental" in results:
         return recreate_sequential_plots(results, output_dir)
+    if "joint" in protocol or "accuracy_epochs" in results:
+        return recreate_joint_plots(results, output_dir)
     raise ValueError("Could not determine the experiment type from the results file.")
 
 

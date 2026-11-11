@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -20,11 +21,45 @@ from analyzer.analyze_results import _statistics
 RESULTS_ROOT = ROOT / "cl" / "results"
 
 
+_COLORS = [
+    "#1f77b4",
+    "#ff7f0e",
+    "#2ca02c",
+    "#d62728",
+    "#9467bd",
+    "#8c564b",
+    "#e377c2",
+    "#7f7f7f",
+    "#bcbd22",
+    "#17becf",
+    "#006d77",
+    "#f4a261",
+    "#2a9d8f",
+    "#e9c46a",
+    "#264653",
+]
+_MARKERS = ["o", "s", "^", "D", "v", "P", "X", "*", "p", "h", "H", "8", "<", ">"]
+
+
 def _clean_experiment_name(folder_name: str) -> str:
     text = folder_name
     prefix = "cifar100_avalanche_"
     if text.startswith(prefix):
         text = text[len(prefix):]
+
+    if text.startswith("metaplasticity"):
+        if "paper" in text:
+            return "Metaplasticity paper"
+
+        match = re.search(r"v(\d+)(?:_m(\d+))?", text)
+        if match:
+            version = match.group(1)
+            momentum = match.group(2)
+            base = f"Metaplasticity v{version}"
+            if momentum:
+                return f"{base} m{momentum}"
+            return base
+        return "Metaplasticity"
 
     if text.startswith("naive_random"):
         return "Naive random"
@@ -37,7 +72,10 @@ def _clean_experiment_name(folder_name: str) -> str:
     text = text.replace("_checkpoint", "")
     text = text.replace("_random", "")
     text = text.replace("_v2", " v2")
-    text = text.replace("_v3_m6", " v3 (m6)")
+    text = text.replace("_v3", " v3")
+    text = text.replace("_v4", " v4")
+    text = text.replace("_m3", " m3")
+    text = text.replace("_m6", " m6")
     text = text.replace("_", " ")
     return text.strip()
 
@@ -169,14 +207,16 @@ def _save_comparison_plot(
     x_values: Any | None = None,
 ) -> None:
     fig, axis = plt.subplots(figsize=(10, 6))
-    for experiment_name, series in sorted(series_by_experiment.items()):
+    for idx, (experiment_name, series) in enumerate(sorted(series_by_experiment.items())):
+        color = _COLORS[idx % len(_COLORS)]
+        marker = _MARKERS[idx % len(_MARKERS)]
         if metric_key == "accuracy_vs_classes" or metric_key == "task_incremental_accuracy_vs_classes":
             x, y = series[metric_key]
-            axis.plot(x, y, marker="o", linewidth=2, label=experiment_name)
+            axis.plot(x, y, marker=marker, linewidth=2, markersize=6, color=color, label=experiment_name)
         else:
             y = series[metric_key]
             x = np.arange(1, len(y) + 1) if x_values is None else x_values
-            axis.plot(x, y, marker="o", linewidth=2, label=experiment_name)
+            axis.plot(x, y, marker=marker, linewidth=2, markersize=6, color=color, label=experiment_name)
 
     axis.set_title(title, fontsize=14)
     axis.set_xlabel(xlabel, fontsize=11)
@@ -198,21 +238,25 @@ def generate_comparison_plots(output_dir: Path | None = None) -> list[Path]:
     if not sequential_results:
         raise FileNotFoundError("No sequential experiment results were found under cl/results.")
 
-    series_by_experiment: dict[str, dict[str, np.ndarray]] = {}
+    all_series_by_experiment: dict[str, dict[str, np.ndarray]] = {}
+    bitflip_series_by_experiment: dict[str, dict[str, np.ndarray]] = {}
     for folder_name, payload in sequential_results:
         label = _clean_experiment_name(folder_name)
         series = _series_from_experiment(payload)
-        if series:
-            series_by_experiment[label] = series
+        if not series:
+            continue
+        all_series_by_experiment[label] = series
+        if label != "Naive random":
+            bitflip_series_by_experiment[label] = series
 
-    if not series_by_experiment:
+    if not all_series_by_experiment:
         raise ValueError("No valid sequential runs with the expected metrics were found.")
 
     generated: list[Path] = []
 
     acc_path_png = output_dir / "accuracy_vs_classes_comparison.png"
     _save_comparison_plot(
-        series_by_experiment,
+        all_series_by_experiment,
         metric_key="accuracy_vs_classes",
         output_path=acc_path_png,
         title="",
@@ -223,7 +267,7 @@ def generate_comparison_plots(output_dir: Path | None = None) -> list[Path]:
 
     task_acc_path_png = output_dir / "task_incremental_r_matrix_comparison.png"
     _save_comparison_plot(
-        series_by_experiment,
+        all_series_by_experiment,
         metric_key="task_incremental_accuracy_vs_classes",
         output_path=task_acc_path_png,
         title="",
@@ -234,7 +278,7 @@ def generate_comparison_plots(output_dir: Path | None = None) -> list[Path]:
 
     bit_path = output_dir / "bitflips_per_task_comparison.png"
     _save_comparison_plot(
-        series_by_experiment,
+        bitflip_series_by_experiment,
         metric_key="bit_flips",
         output_path=bit_path,
         title="",
@@ -245,7 +289,7 @@ def generate_comparison_plots(output_dir: Path | None = None) -> list[Path]:
 
     bwt_path = output_dir / "bwt_per_task_comparison.png"
     _save_comparison_plot(
-        series_by_experiment,
+        all_series_by_experiment,
         metric_key="bwt",
         output_path=bwt_path,
         title="",
@@ -263,4 +307,3 @@ if __name__ == "__main__":
     print("Created:")
     for file in files:
         print(file)
-

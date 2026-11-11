@@ -5,6 +5,17 @@ a time to its state after the previous task and evaluates all previously seen
 tasks. Binary layers restore only the sign of their latent weights; ``fc``
 restores its complete (non-binary) parameters.
 
+Every restoration is evaluated with both protocols from a single forward pass:
+- class-incremental (CIL): argmax over all 100 logits, as the "Standard Acc"
+  of the training script;
+- task-incremental (TIL): argmax restricted to the 10 logits of the evaluated task.
+
+The classifier is restored in three variants, to separate the two CIL effects:
+- ``fc``: whole classifier;
+- ``fc_old_rows``: only the rows of the previously seen classes (damage to old rows);
+- ``fc_new_rows``: only the rows of the classes of the task just trained
+  (interference of the new classes, i.e. task confusion).
+
 Example:
     python cl/forgetting_analysis.py cl/results/cifar100_avalanche_naive_checkpoint_resneta_3seeds
 """
@@ -36,6 +47,15 @@ SEED_NAMES = ("seed42", "seed2023", "seed3047")
 NUM_TASKS = 10
 CLASSES_PER_TASK = 10
 DEFAULT_DATASET_PATH = Path(r"F:/Dataset/CIFAR-100/")
+EVAL_MODES = ("class_incremental", "task_incremental")
+MODE_PREFIX = {"class_incremental": "CIL", "task_incremental": "TIL"}
+CLASSIFIER_VARIANTS = ("fc", "fc_old_rows", "fc_new_rows")
+CLASSIFIER_LABELS = {
+    "fc": "Whole classifier (fc)",
+    "fc_old_rows": "Old-class rows only",
+    "fc_new_rows": "New-class rows only",
+}
+CLASSIFIER_COLORS = {"fc": "#d62728", "fc_old_rows": "#1f77b4", "fc_new_rows": "#2ca02c"}
 
 
 def _load_checkpoint(path: Path) -> dict[str, torch.Tensor]:
@@ -73,7 +93,8 @@ def _evaluate_task(
     device: torch.device,
     batch_size: int,
     num_workers: int,
-) -> float:
+) -> dict[str, float]:
+    """Return CIL and TIL accuracy of one task from a single forward pass."""
     loader = DataLoader(
         task_dataset,
         batch_size=batch_size,
@@ -83,7 +104,8 @@ def _evaluate_task(
     )
     was_training = model.training
     model.eval()
-    correct = 0
+    correct_cil = 0
+    correct_til = 0
     total = 0
     allowed_classes = None
     if hasattr(task_dataset, "indices"):
@@ -98,16 +120,56 @@ def _evaluate_task(
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
             logits = model(images)
+            cil_predictions = logits.argmax(dim=1)
             if allowed_classes is not None:
-                logits = logits.index_select(1, allowed_classes)
-                predictions = allowed_classes[logits.argmax(dim=1)]
+                til_predictions = allowed_classes[
+                    logits.index_select(1, allowed_classes).argmax(dim=1)
+                ]
             else:
-                predictions = logits.argmax(dim=1)
-            correct += int((predictions == labels).sum().item())
+                til_predictions = cil_predictions
+            correct_cil += int((cil_predictions == labels).sum().item())
+            correct_til += int((til_predictions == labels).sum().item())
             total += labels.numel()
     if was_training:
         model.train()
-    return correct / total if total else 0.0
+    return {
+        "class_incremental": correct_cil / total if total else 0.0,
+        "task_incremental": correct_til / total if total else 0.0,
+    }
+
+
+def _evaluate_old_tasks(
+    model: nn.Module,
+    task_datasets: list[Dataset],
+    old_task_ids: range,
+    device: torch.device,
+    batch_size: int,
+    num_workers: int,
+) -> dict[str, list[float]]:
+    """Accuracy of every previously seen task, per evaluation protocol."""
+    results = [
+        _evaluate_task(model, task_datasets[old_id], device, batch_size, num_workers)
+        for old_id in old_task_ids
+    ]
+    return {mode: [result[mode] for result in results] for mode in EVAL_MODES}
+
+
+def _restoration_entry(
+    baseline: list[float],
+    accuracies: list[float],
+    old_task_ids: range,
+) -> dict[str, Any]:
+    baseline_mean = float(np.mean(baseline))
+    restored = float(np.mean(accuracies))
+    return {
+        "baseline_accuracy": baseline_mean,
+        "recovered_accuracy": restored,
+        "recovered_gain": restored - baseline_mean,
+        "old_task_accuracies": {
+            str(old_id + 1): accuracy
+            for old_id, accuracy in zip(old_task_ids, accuracies)
+        },
+    }
 
 
 def _binary_layer_names(state_dict: dict[str, torch.Tensor]) -> list[str]:
@@ -146,6 +208,30 @@ def _restore_classifier(
         if current[name].shape != previous[name].shape:
             raise ValueError(f"Classifier shape changed for parameter {name}.")
         restored[name] = previous[name].clone()
+    return restored
+
+
+def _restore_classifier_rows(
+    current: dict[str, torch.Tensor],
+    previous: dict[str, torch.Tensor],
+    class_ids: list[int],
+) -> dict[str, torch.Tensor]:
+    """Restore only the classifier rows (weight and bias) of ``class_ids``."""
+    restored = {name: tensor.clone() for name, tensor in current.items()}
+    rows = torch.tensor(class_ids, dtype=torch.long)
+    if "fc.weight" not in current:
+        raise ValueError("The checkpoints do not contain fc.weight.")
+    num_classes = current["fc.weight"].shape[0]
+    touched = False
+    for name in current:
+        if not name.startswith("fc.") or name not in previous:
+            continue
+        tensor = current[name]
+        if tensor.dim() >= 1 and tensor.shape[0] == num_classes:
+            restored[name][rows] = previous[name][rows].clone()
+            touched = True
+    if not touched:
+        raise ValueError("No per-class classifier parameters found in fc.")
     return restored
 
 
@@ -251,7 +337,9 @@ def analyze_forgetting(
     )
     for seed_name in SEED_NAMES:
         checkpoint_dir = experiments_dir / seed_name / "checkpoints"
-        per_seed[seed_name] = {"binary_layers": {}, "classifier": {}}
+        per_seed[seed_name] = {
+            mode: {"binary_layers": {}, "classifier": {}} for mode in EVAL_MODES
+        }
         for task_id in range(2, NUM_TASKS + 1):
             progress.set_postfix(seed=seed_name, task=f"{task_id}/{NUM_TASKS}")
             current_path = checkpoint_dir / f"after_task_{task_id:02d}.h5"
@@ -271,70 +359,70 @@ def analyze_forgetting(
             model = Reactnet(num_classes=100, imagenet=False).to(device)
             model.load_state_dict(current, strict=True)
             old_task_ids = range(task_id - 1)
-            baseline = {
-                str(old_id + 1): _evaluate_task(
-                    model, task_datasets[old_id], device, batch_size, num_workers
-                )
-                for old_id in old_task_ids
-            }
+            task_key = str(task_id)
+            evaluate = lambda: _evaluate_old_tasks(  # noqa: E731
+                model, task_datasets, old_task_ids, device, batch_size, num_workers
+            )
+            baseline = evaluate()
 
             for layer in current_layers:
                 model.load_state_dict(
                     _restore_binary_bits(current, previous, layer), strict=True
                 )
-                accuracies = [
-                    _evaluate_task(
-                        model, task_datasets[old_id], device, batch_size, num_workers
+                accuracies = evaluate()
+                for mode in EVAL_MODES:
+                    per_seed[seed_name][mode]["binary_layers"].setdefault(
+                        task_key, {}
+                    )[layer] = _restoration_entry(
+                        baseline[mode], accuracies[mode], old_task_ids
                     )
-                    for old_id in old_task_ids
-                ]
-                restored = float(np.mean(accuracies))
-                baseline_mean = float(np.mean(list(baseline.values())))
-                per_seed[seed_name]["binary_layers"].setdefault(
-                    str(task_id), {}
-                )[layer] = {
-                    "baseline_accuracy": baseline_mean,
-                    "recovered_accuracy": restored,
-                    "recovered_gain": restored - baseline_mean,
-                    "old_task_accuracies": {
-                        str(old_id + 1): accuracy
-                        for old_id, accuracy in zip(old_task_ids, accuracies)
-                    },
-                }
 
-            model.load_state_dict(_restore_classifier(current, previous), strict=True)
-            accuracies = [
-                _evaluate_task(
-                    model, task_datasets[old_id], device, batch_size, num_workers
-                )
-                for old_id in old_task_ids
-            ]
-            restored = float(np.mean(accuracies))
-            baseline_mean = float(np.mean(list(baseline.values())))
-            per_seed[seed_name]["classifier"].setdefault(str(task_id), {})[
-                "fc"
-            ] = {
-                "baseline_accuracy": baseline_mean,
-                "recovered_accuracy": restored,
-                "recovered_gain": restored - baseline_mean,
-                "old_task_accuracies": {
-                    str(old_id + 1): accuracy
-                    for old_id, accuracy in zip(old_task_ids, accuracies)
-                },
+            # Classes seen before the task just trained, and classes of that task.
+            old_classes = list(range((task_id - 1) * CLASSES_PER_TASK))
+            new_classes = list(
+                range((task_id - 1) * CLASSES_PER_TASK, task_id * CLASSES_PER_TASK)
+            )
+            classifier_states = {
+                "fc": _restore_classifier(current, previous),
+                "fc_old_rows": _restore_classifier_rows(current, previous, old_classes),
+                "fc_new_rows": _restore_classifier_rows(current, previous, new_classes),
             }
+            for variant, state in classifier_states.items():
+                model.load_state_dict(state, strict=True)
+                accuracies = evaluate()
+                for mode in EVAL_MODES:
+                    per_seed[seed_name][mode]["classifier"].setdefault(
+                        task_key, {}
+                    )[variant] = _restoration_entry(
+                        baseline[mode], accuracies[mode], old_task_ids
+                    )
             progress.update()
     progress.close()
 
     assert layer_names is not None
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "protocol": "Restore one layer after each task from task 2 onward",
-        "metric": "task-incremental accuracy on the mean of previously seen tasks",
+        "metric": {
+            "class_incremental": "accuracy over all 100 logits, mean of previously seen tasks",
+            "task_incremental": "accuracy over the 10 logits of each task, mean of previously seen tasks",
+        },
         "standard_deviation": "population standard deviation across the three seeds",
         "seeds": per_seed,
         "statistics": {
-            "binary_layers": _aggregate(per_seed, "binary_layers", layer_names),
-            "classifier": _aggregate(per_seed, "classifier", ["fc"]),
+            mode: {
+                "binary_layers": _aggregate(
+                    {seed: run[mode] for seed, run in per_seed.items()},
+                    "binary_layers",
+                    layer_names,
+                ),
+                "classifier": _aggregate(
+                    {seed: run[mode] for seed, run in per_seed.items()},
+                    "classifier",
+                    list(CLASSIFIER_VARIANTS),
+                ),
+            }
+            for mode in EVAL_MODES
         },
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -347,10 +435,11 @@ def analyze_forgetting(
 def plot_forgetting_results(json_path: str | Path) -> list[Path]:
     """Create forgetting plots next to a previously generated JSON file.
 
-    The first plot ranks individual binary layers by recovered accuracy
-    (mean +/- standard deviation across seeds and training tasks). The second
-    plot shows the same gain for every training task and binary layer. The
-    final classifier is shown as a separate reference line.
+    For each evaluation protocol (CIL and TIL) three plots are written, with
+    the protocol as filename prefix (e.g. ``CIL_forgetting_gain_by_layer.png``):
+    the gain of every binary layer (mean +/- std across seeds and training
+    tasks), the same gain for every training task, and the classifier gain.
+    A JSON from the previous schema (TIL only) is plotted with the TIL prefix.
     """
     json_path = Path(json_path)
     if not json_path.is_file():
@@ -360,12 +449,24 @@ def plot_forgetting_results(json_path: str | Path) -> list[Path]:
     statistics = payload.get("statistics")
     if not isinstance(statistics, dict):
         raise ValueError("The JSON does not contain a valid 'statistics' object.")
+    if not any(mode in statistics for mode in EVAL_MODES):
+        statistics = {"task_incremental": statistics}  # schema_version 1
+
+    plots: list[Path] = []
+    for mode in EVAL_MODES:
+        if mode in statistics:
+            plots.extend(
+                _plot_mode(statistics[mode], json_path.parent, MODE_PREFIX[mode])
+            )
+    return plots
+
+
+def _plot_mode(statistics: dict[str, Any], output_dir: Path, prefix: str) -> list[Path]:
     binary = statistics.get("binary_layers")
     classifier = statistics.get("classifier")
     if not isinstance(binary, dict) or not isinstance(classifier, dict):
         raise ValueError("The JSON must contain binary_layers and classifier statistics.")
 
-    output_dir = json_path.parent
     overall = binary.get("overall", {})
     layer_names = _network_order(list(overall))
     if not layer_names:
@@ -400,7 +501,7 @@ def plot_forgetting_results(json_path: str | Path) -> list[Path]:
     axis.set_xlabel("Recovered accuracy (percentage points)")
     axis.grid(axis="x", linestyle="--", alpha=0.4)
     figure.tight_layout()
-    layer_plot = output_dir / "forgetting_gain_by_layer.png"
+    layer_plot = output_dir / f"{prefix}_forgetting_gain_by_layer.png"
     figure.savefig(layer_plot, dpi=300)
     plt.close(figure)
 
@@ -426,30 +527,25 @@ def plot_forgetting_results(json_path: str | Path) -> list[Path]:
     axis.set_ylabel("Task completed after training")
     figure.colorbar(image, ax=axis, label="Recovered accuracy (p.p.)")
     figure.tight_layout()
-    heatmap_plot = output_dir / "forgetting_gain_task_layer.png"
+    heatmap_plot = output_dir / f"{prefix}_forgetting_gain_task_layer.png"
     figure.savefig(heatmap_plot, dpi=300)
     plt.close(figure)
 
     classifier_tasks = classifier.get("per_training_task", {})
-    classifier_gain = [
-        classifier_tasks[task_id]["fc"]["recovered_gain"]["mean"] * 100
-        for task_id in task_ids
-    ]
-    classifier_std = [
-        classifier_tasks[task_id]["fc"]["recovered_gain"]["std"] * 100
-        for task_id in task_ids
-    ]
     figure, axis = plt.subplots(figsize=(9, 5))
     x = np.arange(len(task_ids))
-    axis.errorbar(
-        x,
-        classifier_gain,
-        yerr=classifier_std,
-        marker="o",
-        capsize=4,
-        color="#d62728",
-        label="Final classifier (fc)",
-    )
+    for variant in CLASSIFIER_VARIANTS:
+        if variant not in classifier_tasks.get(task_ids[0], {}):
+            continue  # schema_version 1 has only the whole classifier
+        axis.errorbar(
+            x,
+            [classifier_tasks[t][variant]["recovered_gain"]["mean"] * 100 for t in task_ids],
+            yerr=[classifier_tasks[t][variant]["recovered_gain"]["std"] * 100 for t in task_ids],
+            marker="o",
+            capsize=4,
+            color=CLASSIFIER_COLORS[variant],
+            label=CLASSIFIER_LABELS[variant],
+        )
     axis.axhline(0, color="black", linewidth=1)
     axis.set_xticks(x)
     axis.set_xticklabels([f"Task {task_id}" for task_id in task_ids])
@@ -458,7 +554,7 @@ def plot_forgetting_results(json_path: str | Path) -> list[Path]:
     axis.grid(True, linestyle="--", alpha=0.4)
     axis.legend()
     figure.tight_layout()
-    classifier_plot = output_dir / "forgetting_gain_classifier.png"
+    classifier_plot = output_dir / f"{prefix}_forgetting_gain_classifier.png"
     figure.savefig(classifier_plot, dpi=300)
     plt.close(figure)
 
@@ -495,7 +591,7 @@ def _network_order(
     return ordered
 
 
-EXPERIMENTS_DIR = ROOT / "cl" / "results" / "cifar100_avalanche_Metaplasticity_checkpoint_resneta_3seeds"
+EXPERIMENTS_DIR = ROOT / "cl" / "results" / "cifar100_avalanche_naive_checkpoint_resneta_3seeds"
 DATASET_PATH = DEFAULT_DATASET_PATH
 OUTPUT_PATH: Path | None = None
 BATCH_SIZE = 256

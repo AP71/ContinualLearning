@@ -55,7 +55,7 @@ def _statistics(values: list[Any]) -> dict[str, Any]:
 
     return {
         "mean": mean,
-        "variance": variance,
+        "std": np.sqrt(np.maximum(variance, 0.0)),
         "count": count,
     }
 
@@ -68,19 +68,18 @@ def _save_curve(
     *,
     x_values: list[float] | None = None,
     percentage: bool = False,
-    variance_as_errorbar: bool = False,
+    standard_deviation_as_errorbar: bool = False,
 ) -> dict[str, Any]:
     stats = _statistics(values)
     mean = np.asarray(stats["mean"], dtype=float).reshape(-1)
-    variance = np.asarray(stats["variance"], dtype=float).reshape(-1)
-    spread = np.sqrt(np.maximum(variance, 0.0))
+    standard_deviation = np.asarray(stats["std"], dtype=float).reshape(-1)
     x = np.arange(1, len(mean) + 1) if x_values is None else np.asarray(x_values)
     if x_values is not None:
         plot_accuracy_vs_classes(
             mean.tolist(),
             x.tolist(),
             path,
-            variance=spread.tolist(),
+            standard_deviation=standard_deviation.tolist(),
         )
     else:
         plot_task_metric(
@@ -89,8 +88,8 @@ def _save_curve(
             "",
             path,
             percentage_axis=percentage,
-            variance=spread.tolist(),
-            variance_as_errorbar=variance_as_errorbar,
+            standard_deviation=standard_deviation.tolist(),
+            standard_deviation_as_errorbar=standard_deviation_as_errorbar,
         )
     return stats
 
@@ -98,15 +97,15 @@ def _save_curve(
 def _save_history(values: list[Any], path: Path, title: str) -> dict[str, Any]:
     stats = _statistics(values)
     mean = np.asarray(stats["mean"], dtype=float)
-    variance = np.asarray(stats["variance"], dtype=float)
+    standard_deviation = np.asarray(stats["std"], dtype=float)
     if mean.ndim == 1:
         mean = mean[None, :]
-        variance = variance[None, :]
+        standard_deviation = standard_deviation[None, :]
     plot_accuracy_history(
         mean.tolist(),
         path,
         title=None,
-        variance_history=np.sqrt(np.maximum(variance, 0.0)).tolist(),
+        standard_deviation_history=standard_deviation.tolist(),
         show_markers=False,
     )
     return stats
@@ -115,14 +114,14 @@ def _save_history(values: list[Any], path: Path, title: str) -> dict[str, Any]:
 def _save_joint_history(values: list[Any], path: Path) -> dict[str, Any]:
     stats = _statistics(values)
     mean = np.asarray(stats["mean"], dtype=float).reshape(-1)
-    variance = np.asarray(stats["variance"], dtype=float).reshape(-1)
+    standard_deviation = np.asarray(stats["std"], dtype=float).reshape(-1)
     plot_accuracy_history(
         [mean.tolist()],
         path,
         title=None,
-        variance_history=[np.sqrt(np.maximum(variance, 0.0)).tolist()],
+        standard_deviation_history=[standard_deviation.tolist()],
         show_markers=False,
-        legend_labels=["Mean ± variance"],
+        legend_labels=["Mean ± SD"],
     )
     return stats
 
@@ -135,18 +134,16 @@ def _save_joint_point(
     *,
     scale: float = 1.0,
     label_format: str = "{:.2f}%",
-    variance_values: list[Any] | None = None,
+    standard_deviation_values: list[Any] | None = None,
 ) -> dict[str, Any]:
     stats = _statistics(values)
     mean = np.asarray(stats["mean"], dtype=float).reshape(-1) * scale
-    spread = None
-    if variance_values is not None:
-        spread = np.sqrt(
-            np.maximum(
-                np.asarray(_statistics(variance_values)["variance"], dtype=float),
-                0.0,
-            )
-        ).reshape(-1) * scale
+    standard_deviation = None
+    if standard_deviation_values is not None:
+        standard_deviation = (
+            np.asarray(_statistics(standard_deviation_values)["std"], dtype=float).reshape(-1)
+            * scale
+        )
     plot_task_metric(
         mean.tolist(),
         ylabel,
@@ -155,8 +152,10 @@ def _save_joint_point(
         connect_points=False,
         point_labels=(np.asarray(labels, dtype=float).reshape(-1)).tolist(),
         label_format=label_format,
-        variance=None if spread is None else spread.tolist(),
-        variance_as_errorbar=True,
+        standard_deviation=(
+            None if standard_deviation is None else standard_deviation.tolist()
+        ),
+        standard_deviation_as_errorbar=True,
     )
     return stats
 
@@ -170,10 +169,10 @@ def _save_matrix(
 ) -> dict[str, Any]:
     stats = _statistics(values)
     mean = np.asarray(stats["mean"], dtype=float)
-    variance = np.asarray(stats["variance"], dtype=float)
+    standard_deviation = np.asarray(stats["std"], dtype=float)
     annotations = [
         [
-            f"{mean[row, col]:.4f}\n±{variance[row, col]:.4f}"
+            f"{mean[row, col]:.4f}\n±{standard_deviation[row, col]:.4f}"
             if not np.isnan(mean[row, col])
             else ""
             for col in range(mean.shape[1])
@@ -288,7 +287,7 @@ def analyze_results(results_path: Path) -> dict[str, Any]:
                 "Accuracy (%)",
                 [final_mean * 100.0],
                 scale=100.0,
-                variance_values=values,
+                standard_deviation_values=values,
             )
 
         values = collect("confusion_matrix")
@@ -313,7 +312,7 @@ def analyze_results(results_path: Path) -> dict[str, Any]:
                 "Flipped bits",
                 [mean_percentage],
                 label_format="{:.4f}%",
-                variance_values=values,
+                standard_deviation_values=values,
             )
 
     else:
@@ -332,4 +331,4 @@ def analyze_results(results_path: Path) -> dict[str, Any]:
 
 
 if __name__ == "__main__":
-    analyze_results(Path(r"F:\TesiMagistrale\ContinualLearning\cl\results\cifar100_avalanche_Metaplasticity_checkpoint_resneta_3seeds\results.json"))
+    analyze_results(Path(r"F:\TesiMagistrale\ContinualLearning\cl\results\cifar100_avalanche_FreezingHead_checkpoint_resneta_3seeds\results.json"))
