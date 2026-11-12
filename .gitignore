@@ -6,3 +6,4 @@ inference/models/
 .idea/
 *.png
 *.json
+*.txt
