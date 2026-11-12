@@ -1,235 +1,191 @@
-"""Split CIFAR-100 experiments refactored with Avalanche (Multiple CL Strategies)."""
+"""Motore comune per gli esperimenti Split CIFAR-100 class-incremental con Avalanche.
 
+Ogni metodo (cl/methods/*.py) fornisce solo:
+  - build_optimizer(model, cfg) -> optimizer   (default: Adam sui parametri addestrabili)
+  - build_strategy(common_args, cfg) -> strategy (default: Naive)
+Tutto il resto (benchmark, scheduler, checkpoint e bit flip, valutazione CIL/TIL,
+salvataggio dei risultati, aggregazione dei 3 seed) è identico per tutti i metodi.
+"""
 from __future__ import annotations
 
 import json
 import logging
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-
-import torch
-from torch import nn
-from torchvision import datasets, transforms
-
-# Avalanche imports per le strategie di Continual Learning
-from avalanche.training import Naive, Replay, LwF, EWC
-from avalanche.logging import InteractiveLogger, TextLogger
-from avalanche.training.plugins import EvaluationPlugin, LRSchedulerPlugin
-
-# Custom imports dal tuo progetto
-from avalanche_plugin.epoch_tracker import EpochTrackerPlugin
-from avalanche_plugin.utils import evaluate_dataset, set_seed, create_benchmark, create_model, evaluate_confusion_matrix
-
-_orig_multistep_init = torch.optim.lr_scheduler.MultiStepLR.__init__
-
-
-def _patched_multistep_init(self, *args, **kwargs):
-    kwargs.pop('verbose', None)
-    _orig_multistep_init(self, *args, **kwargs)
-
-
-torch.optim.lr_scheduler.MultiStepLR.__init__ = _patched_multistep_init
+from typing import Callable, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import torch
+from avalanche.logging import InteractiveLogger, TextLogger
+from avalanche.training import Naive
+from avalanche.training.plugins import EvaluationPlugin, LRSchedulerPlugin
+from torch import nn
+from torchvision import datasets, transforms
+
 from avalanche_plugin.checkpoint_and_BitFlip import CheckpointAndBitFlipPlugin
-from avalanche_plugin.metaplasticity import MetaplasticityPlugin
+from avalanche_plugin.epoch_tracker import EpochTrackerPlugin
 from avalanche_plugin.results import save_avalanche_sequential_results
+from avalanche_plugin.utils import (
+    create_benchmark,
+    create_model,
+    evaluate_confusion_matrix,
+    evaluate_dataset,
+    set_seed,
+)
 
-# ==============================================================================
-# STRATEGY CONFIGURATION - Scegli qui l'esperimento da eseguire
-# ==============================================================================
-# Opzioni supportate: "Freezing", "FreezingHead", "Replay", "LwF", "EWC", "Metaplasticity"
-STRATEGY_NAME = "FreezingHead"
+# Compatibilità: alcune versioni di Avalanche passano 'verbose' a MultiStepLR
+_orig_multistep_init = torch.optim.lr_scheduler.MultiStepLR.__init__
 
-# Hyper-parameters specifici per le strategie CL (da tunare per la BNN)
-REPLAY_MEM_SIZE = 2000  # Numero totale di immagini salvate nel buffer
-LWF_ALPHA = 1.0  # Peso della loss di distillazione (abbassare se i bit non flippano)
-LWF_TEMPERATURE = 2.0  # Temperatura per ammorbidire i logit
-EWC_LAMBDA = 1e5  # Forza della penalità basata sull'informazione di Fisher
-GEM_PATTERNS_PER_EXP = 200  # Pattern salvati per esperienza per GEM/AGEM
-AGEM_SAMPLE_SIZE = 64  # Batch size del replay in AGEM
-METAPLASTICITY_M = None  # Forza di consolidamento metaplastico m (Laborieux et al.)
-METAPLASTICITY_VERSION = "v4" # Versione del plugin Metaplasticity da usare
-METAPLASTICITY_CLASSIFIER = "fc"  # Nome del classificatore finale da proteggere
-# ==============================================================================
 
-DATASET_PATH = Path(r"F:/Dataset/CIFAR-100/")
-CHECKPOINT_PATH: Path | None = None
-MODEL_NAME = "resneta"
-OUTPUT_ROOT = ROOT / "cl" / "results"
-BATCH_SIZE = 256
-WORKERS = 0
-EPOCHS_PER_TASK = 40
-LEARNING_RATE = 1e-3
-WEIGHT_DECAY = 0.0
-SEEDS = (42, 2023, 3047)
-SEED = SEEDS[1]
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def _patched_multistep_init(self, *args, **kwargs):
+    kwargs.pop("verbose", None)
+    _orig_multistep_init(self, *args, **kwargs)
+
+
+torch.optim.lr_scheduler.MultiStepLR.__init__ = _patched_multistep_init
+
 LOGGER = logging.getLogger("split_cifar100")
 torch.set_float32_matmul_precision("high")
 
 
-def run_sequential_avalanche(
-        initialization: str = "checkpoint",
-        output_dir: Path | None = None,
-):
-    set_seed(seed=SEED)
+@dataclass
+class TrainConfig:
+    dataset_path: Path = Path(r"F:/Dataset/CIFAR-100/")
+    checkpoint_path: Path | None = None
+    model_name: str = "resneta"
+    output_root: Path = ROOT / "cl" / "results"
+    batch_size: int = 256
+    workers: int = 0
+    epochs_per_task: int = 40
+    learning_rate: float = 1e-3
+    weight_decay: float = 0.0
+    lr_milestones: tuple[int, ...] = (20, 25)
+    lr_gamma: float = 0.1
+    seeds: tuple[int, ...] = (42, 2023, 3047)
+    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+OptimizerBuilder = Callable[[nn.Module, TrainConfig], torch.optim.Optimizer]
+StrategyBuilder = Callable[[dict, TrainConfig], object]
+
+
+def adam(model: nn.Module, cfg: TrainConfig) -> torch.optim.Optimizer:
+    """Adam sui soli parametri addestrabili (tutti, se nulla è congelato)."""
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    return torch.optim.Adam(trainable, lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
+
+
+def naive(common_args: dict, cfg: TrainConfig):
+    return Naive(**common_args)
+
+
+def run_sequential(
+    name: str,
+    build_optimizer: OptimizerBuilder = adam,
+    build_strategy: StrategyBuilder = naive,
+    cfg: TrainConfig | None = None,
+    seed: int = 42,
+    initialization: str = "checkpoint",
+    output_dir: Path | None = None,
+    suffix: str = "",
+) -> Path:
+    """Un'esecuzione completa (10 task) per un seed."""
+    cfg = cfg or TrainConfig()
+    set_seed(seed=seed)
     if output_dir is None:
-        output_dir = OUTPUT_ROOT / (
-            f"cifar100_avalanche_{STRATEGY_NAME}_{initialization}_{MODEL_NAME}_"
-            f"seed{SEED}_{datetime.now():%Y%m%d_%H%M%S}"
-            f"{METAPLASTICITY_VERSION if STRATEGY_NAME == 'Metaplasticity' else ''}"
+        output_dir = cfg.output_root / (
+            f"cifar100_avalanche_{name}_{initialization}_{cfg.model_name}_"
+            f"seed{seed}_{datetime.now():%Y%m%d_%H%M%S}{suffix}"
         )
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    scenario, val_dataset = create_benchmark(DATASET_PATH, seed=SEED, is_joint=False)
+    scenario, _ = create_benchmark(cfg.dataset_path, seed=seed, is_joint=False)
     num_tasks = scenario.n_experiences
-    model = create_model(initialization, DEVICE, LOGGER, CHECKPOINT_PATH, ROOT)
+    model = create_model(initialization, cfg.device, LOGGER, cfg.checkpoint_path, ROOT)
+    optimizer = build_optimizer(model, cfg)
 
-    # --------------------------------------------------------------------------
-    # GESTIONE OTTIMIZZATORE: Seleziona quali pesi addestrare
-    # --------------------------------------------------------------------------
-    if STRATEGY_NAME in ("Freezing", "FreezingHead"):
-        print("\n>>> STRATEGIA FREEZING: Blocco tutti i layer tranne il classificatore finale ('fc')...")
-        for name, param in model.named_parameters():
-            if not name.startswith("fc"):
-                param.requires_grad = False
-
-        # Passiamo all'ottimizzatore SOLO i parametri che richiedono il gradiente
-        trainable_params = filter(lambda p: p.requires_grad, model.parameters())
-        optimizer = torch.optim.Adam(trainable_params, lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-    else:
-        # Per tutte le altre strategie (Replay, LwF, EWC, Metaplasticity...), addestriamo tutta la rete
-        optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-    # --------------------------------------------------------------------------
-
-    # Scheduler settato per il singolo Task (Reset a ogni nuovo task)
+    # Scheduler per il singolo task (resettato a ogni nuovo task)
     scheduler = torch.optim.lr_scheduler.MultiStepLR(
-        optimizer,
-        milestones=[20, 25],
-        gamma=0.1
+        optimizer, milestones=list(cfg.lr_milestones), gamma=cfg.lr_gamma
     )
-
     lr_scheduler_plugin = LRSchedulerPlugin(
-        scheduler,
-        step_granularity='epoch',
-        reset_scheduler=True,
-        reset_lr=True
+        scheduler, step_granularity="epoch", reset_scheduler=True, reset_lr=True
     )
-
-    # Plugin per salvare i pesi e calcolare i bit-flips
-    custom_plugin = CheckpointAndBitFlipPlugin(
+    # Salvataggio dei pesi e calcolo dei bit flip (codice nostro)
+    bitflip_plugin = CheckpointAndBitFlipPlugin(
         checkpoint_dir=output_dir / "checkpoints",
         compare_dir=output_dir / "compare",
         LOGGER=LOGGER,
     )
-
     epoch_tracker = EpochTrackerPlugin(
         test_stream=scenario.test_stream,
         num_tasks=num_tasks,
-        device=DEVICE,
-        batch_size=BATCH_SIZE,
-        num_workers=WORKERS,
+        device=cfg.device,
+        batch_size=cfg.batch_size,
+        num_workers=cfg.workers,
     )
-
     loggers = [
         InteractiveLogger(),
         TextLogger(open(output_dir / "training_log.txt", "w", encoding="utf-8")),
     ]
-    eval_plugin = EvaluationPlugin(loggers=loggers)
 
-    # --------------------------------------------------------------------------
-    # INIZIALIZZAZIONE DELLA STRATEGIA AVALANCHE SCELTA
-    # --------------------------------------------------------------------------
     common_args = {
         "model": model,
         "optimizer": optimizer,
         "criterion": nn.CrossEntropyLoss(),
-        "train_mb_size": BATCH_SIZE,
-        "train_epochs": EPOCHS_PER_TASK,
-        "eval_mb_size": BATCH_SIZE,
-        "device": DEVICE,
-        "plugins": [custom_plugin, epoch_tracker, lr_scheduler_plugin],
-        "evaluator": eval_plugin,
+        "train_mb_size": cfg.batch_size,
+        "train_epochs": cfg.epochs_per_task,
+        "eval_mb_size": cfg.batch_size,
+        "device": cfg.device,
+        "plugins": [bitflip_plugin, epoch_tracker, lr_scheduler_plugin],
+        "evaluator": EvaluationPlugin(loggers=loggers),
     }
-
     print(f"\n=======================================================")
-    print(f" Inizializzazione Strategia Continual Learning: {STRATEGY_NAME}")
+    print(f" Strategia: {name}{suffix}  |  seed {seed}")
     print(f"=======================================================")
-
-    if STRATEGY_NAME == "Freezing":
-        strategy = Naive(**common_args)
-    elif STRATEGY_NAME == "FreezingHead":
-        head_plugin = MetaplasticityPlugin(
-            version="v2",
-            classifier_name=METAPLASTICITY_CLASSIFIER,
-        )
-        common_args["plugins"] = [head_plugin] + common_args["plugins"]
-        strategy = Naive(**common_args)
-    elif STRATEGY_NAME == "Replay":
-        strategy = Replay(mem_size=REPLAY_MEM_SIZE, **common_args)
-    elif STRATEGY_NAME == "LwF":
-        strategy = LwF(alpha=LWF_ALPHA, temperature=LWF_TEMPERATURE, **common_args)
-    elif STRATEGY_NAME == "EWC":
-        strategy = EWC(ewc_lambda=EWC_LAMBDA, **common_args)
-    elif STRATEGY_NAME == "Metaplasticity":
-        metaplasticity_plugin = MetaplasticityPlugin(
-            version=METAPLASTICITY_VERSION,
-            classifier_name=METAPLASTICITY_CLASSIFIER,
-        )
-        common_args["plugins"] = [metaplasticity_plugin] + common_args["plugins"]
-        strategy = Naive(**common_args)
-    else:
-        raise ValueError(f"Strategia sconosciuta: {STRATEGY_NAME}")
-    # --------------------------------------------------------------------------
+    strategy = build_strategy(common_args, cfg)
 
     standard_matrix: list[list[float | None]] = [[None] * num_tasks for _ in range(num_tasks)]
     task_matrix: list[list[float | None]] = [[None] * num_tasks for _ in range(num_tasks)]
+    # Split CIFAR-100 a blocchi ordinati di 10 classi
+    task_classes = [torch.arange(t * 10, (t + 1) * 10, device=cfg.device) for t in range(num_tasks)]
 
-    # Mappa le classi per ciascun task (Split-CIFAR-100 a blocchi ordinati di 10 classi)
-    task_classes_tensors = [
-        torch.arange(t * 10, (t + 1) * 10, device=DEVICE) for t in range(num_tasks)
-    ]
-
-    # Training Sequenziale Continual Learning
     for experience in scenario.train_stream:
         task_id = experience.current_experience
         print(f"\n=======================================================")
         print(f"  Training Task {task_id + 1}/{num_tasks}")
         print(f"=======================================================")
-        strategy.train(experience, num_workers=WORKERS)
+        strategy.train(experience, num_workers=cfg.workers)
 
         print(f"\n>> Valutazione Cross-Task a fine Task {task_id + 1}...")
-        # Valuta tutti i task passati (0 .. task_id) per calcolare la riga task_id delle due matrici
         for evaluated_id in range(task_id + 1):
             test_dataset = scenario.test_stream[evaluated_id].dataset
-
-            # 1. Valutazione Class-Incremental (standard, senza logit masking)
-            std_acc = evaluate_dataset(strategy.model, test_dataset, DEVICE, allowed_classes=None)
-            standard_matrix[task_id][evaluated_id] = std_acc
-
-            # 2. Valutazione Task-Incremental (con logit masking ristretto alle classi del task)
+            # Class-incremental: tutti i logit
+            std_acc = evaluate_dataset(strategy.model, test_dataset, cfg.device, allowed_classes=None)
+            # Task-incremental: logit ristretti alle classi del task
             task_acc = evaluate_dataset(
                 strategy.model,
                 test_dataset,
-                DEVICE,
-                allowed_classes=task_classes_tensors[evaluated_id],
-                batch_size=BATCH_SIZE,
-                num_workers=WORKERS,
+                cfg.device,
+                allowed_classes=task_classes[evaluated_id],
+                batch_size=cfg.batch_size,
+                num_workers=cfg.workers,
             )
+            standard_matrix[task_id][evaluated_id] = std_acc
             task_matrix[task_id][evaluated_id] = task_acc
-
             print(
-                f"  -> Task {evaluated_id + 1}: Standard Acc = {std_acc * 100:.2f}%, Masked Acc = {task_acc * 100:.2f}%")
+                f"  -> Task {evaluated_id + 1}: Standard Acc = {std_acc * 100:.2f}%, "
+                f"Masked Acc = {task_acc * 100:.2f}%"
+            )
 
-    # Calcolo della matrice di confusione finale 100x100
     print("\n>> Calcolo Confusion Matrix finale...")
     full_test_dataset = datasets.CIFAR100(
-        DATASET_PATH,
+        cfg.dataset_path,
         train=False,
         download=False,
         transform=transforms.Compose([
@@ -237,8 +193,9 @@ def run_sequential_avalanche(
             transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
         ]),
     )
-    conf_matrix = evaluate_confusion_matrix(strategy.model, full_test_dataset, DEVICE, batch_size=BATCH_SIZE,
-                                            num_workers=WORKERS)
+    conf_matrix = evaluate_confusion_matrix(
+        strategy.model, full_test_dataset, cfg.device, batch_size=cfg.batch_size, num_workers=cfg.workers
+    )
 
     save_avalanche_sequential_results(
         output_dir=output_dir,
@@ -246,10 +203,10 @@ def run_sequential_avalanche(
         task_matrix=task_matrix,
         accuracy_history=epoch_tracker.accuracy_history,
         loss_history=epoch_tracker.loss_history,
-        custom_plugin=custom_plugin,
+        custom_plugin=bitflip_plugin,
         num_tasks=num_tasks,
-        epochs_per_task=EPOCHS_PER_TASK,
-        model_name=MODEL_NAME,
+        epochs_per_task=cfg.epochs_per_task,
+        model_name=cfg.model_name,
         initialization=initialization,
         confusion_matrix_arr=conf_matrix,
     )
@@ -257,36 +214,77 @@ def run_sequential_avalanche(
     return output_dir
 
 
-def run_three_seeds(initialization: str = "checkpoint") -> Path:
-    """Run Avalanche for all seeds inside one parent experiment directory."""
-    global SEED
-    aggregate_dir = OUTPUT_ROOT / (
-        f"cifar100_avalanche_{STRATEGY_NAME}_{initialization}_{MODEL_NAME}_3seeds"
+def run_three_seeds(
+    name: str,
+    build_optimizer: OptimizerBuilder = adam,
+    build_strategy: StrategyBuilder = naive,
+    cfg: TrainConfig | None = None,
+    initialization: str = "checkpoint",
+    suffix: str = "",
+    overwrite: bool = False,
+    seeds: Sequence[int] | None = None,
+) -> Path:
+    """Esegue i seed richiesti nella cartella dell'esperimento e rigenera il results.json
+    aggregato con tutti i seed presenti nella cartella.
+
+    seeds=None esegue tutti i seed di cfg; una lista (es. [42]) solo quelli, così i
+    mancanti si aggiungono in seguito lanciando di nuovo con la lista dei seed restanti.
+    Un seed che ha già risultati non viene rieseguito, a meno di overwrite=True.
+    """
+    cfg = cfg or TrainConfig()
+    seeds = list(cfg.seeds if seeds is None else seeds)
+    aggregate_dir = cfg.output_root / (
+        f"cifar100_avalanche_{name}_{initialization}_{cfg.model_name}_3seeds{suffix}"
     )
+    done = [s for s in seeds if (aggregate_dir / f"seed{s}" / "results.json").exists()]
+    if done and not overwrite:
+        raise FileExistsError(
+            f"{aggregate_dir.name}: i seed {done} hanno già risultati. "
+            "Toglili dalla lista o usa overwrite=True."
+        )
     aggregate_dir.mkdir(parents=True, exist_ok=True)
+
+    for seed in seeds:
+        run_sequential(
+            name, build_optimizer, build_strategy, cfg,
+            seed=seed, initialization=initialization, output_dir=aggregate_dir / f"seed{seed}",
+        )
+
+    # Aggregato con tutti i seed presenti (anche quelli di lanci precedenti)
+    present = sorted(
+        (int(d.name.removeprefix("seed")) for d in aggregate_dir.glob("seed*")
+         if (d / "results.json").exists()),
+        key=lambda s: (s not in cfg.seeds, cfg.seeds.index(s) if s in cfg.seeds else s),
+    )
     results_by_seed = {}
-    for seed in SEEDS:
-        SEED = seed
-        output_dir = aggregate_dir / f"seed{seed}"
-        run_sequential_avalanche(initialization, output_dir=output_dir)
-        results_path = output_dir / "results.json"
-        result = json.loads(results_path.read_text(encoding="utf-8"))
+    for seed in present:
+        result = json.loads((aggregate_dir / f"seed{seed}" / "results.json").read_text(encoding="utf-8"))
         result["seed"] = seed
         results_by_seed[str(seed)] = result
 
     aggregate = {
         "schema_version": 2,
         "experiment_type": "sequential",
-        "strategy": STRATEGY_NAME,
-        "model_name": MODEL_NAME,
+        "strategy": name,
+        "model_name": cfg.model_name,
         "initialization": initialization,
         "seeds": results_by_seed,
     }
-    (aggregate_dir / "results.json").write_text(
-        json.dumps(aggregate, indent=2), encoding="utf-8"
-    )
+    (aggregate_dir / "results.json").write_text(json.dumps(aggregate, indent=2), encoding="utf-8")
+    print(f"\n[Aggregato] {aggregate_dir.name}: seed presenti {present}")
     return aggregate_dir
 
 
-if __name__ == "__main__":
-    run_three_seeds("checkpoint")
+def run_method(
+    name: str,
+    build_optimizer: OptimizerBuilder = adam,
+    build_strategy: StrategyBuilder = naive,
+    cfg: TrainConfig | None = None,
+    initialization: str = "checkpoint",
+    suffix: str = "",
+    seeds: Sequence[int] | None = None,
+) -> Path:
+    """Punto di ingresso dei file in cl/methods (seeds=None: tutti i seed)."""
+    return run_three_seeds(
+        name, build_optimizer, build_strategy, cfg, initialization, suffix, seeds=seeds
+    )

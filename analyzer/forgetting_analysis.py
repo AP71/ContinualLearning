@@ -187,10 +187,26 @@ def _restore_binary_bits(
     previous: dict[str, torch.Tensor],
     layer_name: str,
 ) -> dict[str, torch.Tensor]:
+    """Restore the previous *effective* bits sign(W - mean) of a SWS binary conv.
+
+    Magnitudes |W_cur - mean_cur| are kept; positive and negative parts are
+    rescaled so the restored filter has zero mean around mean_cur, which makes
+    sign(W_new - mean(W_new)) equal to the previous bits exactly.
+    """
     restored = {name: tensor.clone() for name, tensor in current.items()}
-    current_weight = restored[layer_name]
-    previous_weight = previous[layer_name]
-    restored[layer_name] = current_weight.abs() * previous_weight.sign()
+    cur = restored[layer_name].float()
+    prev = previous[layer_name].float()
+    dims = tuple(range(1, cur.ndim))
+    bits = torch.sign(prev - prev.mean(dim=dims, keepdim=True))
+    bits[bits == 0] = 1.0
+    mean_cur = cur.mean(dim=dims, keepdim=True)
+    mag = (cur - mean_cur).abs() + 1e-12
+    pos = bits > 0
+    total = mag.sum(dim=dims, keepdim=True)
+    s_pos = (mag * pos).sum(dim=dims, keepdim=True).clamp_min(1e-12)
+    s_neg = (mag * ~pos).sum(dim=dims, keepdim=True).clamp_min(1e-12)
+    centered = torch.where(pos, mag * total / (2 * s_pos), -mag * total / (2 * s_neg))
+    restored[layer_name] = (mean_cur + centered).to(restored[layer_name].dtype)
     return restored
 
 
@@ -401,7 +417,7 @@ def analyze_forgetting(
 
     assert layer_names is not None
     result = {
-        "schema_version": 2,
+        "schema_version": 3,  # 3: restore of effective SWS bits sign(W - mean)
         "protocol": "Restore one layer after each task from task 2 onward",
         "metric": {
             "class_incremental": "accuracy over all 100 logits, mean of previously seen tasks",

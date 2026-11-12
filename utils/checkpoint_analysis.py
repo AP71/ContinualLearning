@@ -30,6 +30,15 @@ def _load_state_dict(checkpoint: str | Path | Mapping[str, Any]) -> dict[str, to
         raise ValueError("The checkpoint does not contain tensor parameters.")
     return tensors
 
+"""Effective bits of an A&B-BNN binary conv (HardBinaryScaledStdConv2d).
+The forward pass binarizes the weight *after* Scaled Weight Standardization,
+so the bit is sign(W - mean_per_filter), not sign(W)."""
+def sws_bits(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.ndim < 2:
+        return torch.sign(tensor)
+    dims = tuple(range(1, tensor.ndim))
+    return torch.sign(tensor - tensor.mean(dim=dims, keepdim=True))
+
 """Identify binary layers using the naming convention used by ReActNet."""
 def _default_binary_layer(name: str, tensor: torch.Tensor) -> bool:
     del tensor
@@ -76,14 +85,14 @@ def extract_weights(checkpoint: str | Path | Mapping[str, Any], binary_layer_pre
         if name.endswith(".weight") and tensor.is_floating_point()
     }
     binary = {
-        name: torch.sign(tensor)
+        name: sws_bits(tensor)
         for name, tensor in latent.items()
         if predicate(name, tensor)
     }
     return {"latent": latent, "binary": binary}
 
 """Compare two checkpoints layer by layer.
-Binary weights are represented by ``sign(latent_weight)``. 
+Binary weights are represented by ``sign(latent_weight - per-filter mean)`` (see ``sws_bits``).
 The returned ``layers`` entry contains latent distributions for every matching weight
 tensor and bit-flip counts/percentages for detected binary layers.
 """
@@ -128,8 +137,8 @@ def compare_checkpoints(
             "binary": bool(predicate(name, tensor_a)),
         }
         if layer_result["binary"]:
-            binary_a = torch.sign(tensor_a)
-            binary_b = torch.sign(tensor_b)
+            binary_a = sws_bits(tensor_a)
+            binary_b = sws_bits(tensor_b)
             flips = int((binary_a != binary_b).sum().item())
             bits = int(binary_a.numel())
             layer_result.update(

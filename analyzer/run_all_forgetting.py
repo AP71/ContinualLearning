@@ -53,7 +53,7 @@ def _is_outdated(json_path: Path) -> bool:
         payload = json.loads(json_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return True
-    return int(payload.get("schema_version", 1)) < 2
+    return int(payload.get("schema_version", 1)) < 3  # < 3: pre-SWS restore
 
 
 def find_experiments(results_dir: Path = RESULTS_DIR) -> list[Path]:

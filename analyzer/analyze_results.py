@@ -217,9 +217,14 @@ def analyze_results(results_path: Path) -> dict[str, Any]:
 
     results = json.loads(results_path.read_text(encoding="utf-8"))
     seeds = results.get("seeds")
-    if not isinstance(seeds, dict) or not seeds:
-        raise ValueError("The JSON must contain a non-empty 'seeds' object.")
-    runs = list(seeds.values())
+    if isinstance(seeds, dict) and seeds:
+        runs = list(seeds.values())
+    elif "experiment_type" in results:
+        # Run singola (cl/results/trials): stesso schema di un seed, deviazione standard nulla
+        seeds = {str(results.get("seed", "single")): results}
+        runs = [results]
+    else:
+        raise ValueError("The JSON must contain a non-empty 'seeds' object or a single run.")
     output_dir = results_path.parent
     experiment_type = str(results.get("experiment_type", "")).lower()
     def collect(key: str) -> list[Any]:
@@ -331,4 +336,5 @@ def analyze_results(results_path: Path) -> dict[str, Any]:
 
 
 if __name__ == "__main__":
-    analyze_results(Path(r"F:\TesiMagistrale\ContinualLearning\cl\results\cifar100_avalanche_FreezingHead_checkpoint_resneta_3seeds\results.json"))
+    analyze_results(Path(
+        r"/cl/results/cifar100_avalanche_Metaplasticity_checkpoint_resneta_3seeds_v3_m10/seed42/results.json"))
