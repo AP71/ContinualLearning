@@ -18,10 +18,10 @@ from avalanche_plugin.classifier_protection import ClassifierProtectionPlugin
 from cl.avalanche_trainer_methods import run_method
 from optimizer.adam_meta import AdamMeta, binary_weight_params
 
-SEEDS = [42]  # None = tutti (42, 2023, 3047); es. [42], poi [2023, 3047] per completare
+SEEDS = [2023, 3047]  # None = tutti (42, 2023, 3047); es. [42], poi [2023, 3047] per completare
 
 VERSION = "v3"  # "v1" oppure "v3"
-M = 10  # None = default della versione
+M = 20  # None = default della versione
 CLASSIFIER = "fc"
 
 VERSIONS = {

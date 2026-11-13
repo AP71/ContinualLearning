@@ -10,7 +10,7 @@ as the sequential experiments (Adam 1e-3, 40 epochs, MultiStepLR [20, 25]).
 The epoch is selected on the validation split (50 images per class), never on
 the test set; the last-epoch test accuracy is reported as well.
 
-Results go to ``cl/results/linear_probe/`` (outside the top-level folders that
+Results go to ``cl/results/Linear/`` (outside the top-level folders that
 the comparison and forgetting scripts scan).
 
 Example:
@@ -46,7 +46,9 @@ DATASET_PATH = Path(r"F:/Dataset/CIFAR-100/")
 CHECKPOINT_PATH: Path | None = None
 INITIALIZATION = "checkpoint"
 MODEL_NAME = "resneta"
-OUTPUT_ROOT = ROOT / "cl" / "results" / "linear_probe"
+from cl.results_layout import results_dir  # noqa: E402
+
+OUTPUT_ROOT = results_dir("linear_probe")  # cl/results/Linear
 BATCH_SIZE = 256
 WORKERS = 0
 EPOCHS = 40

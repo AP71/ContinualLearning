@@ -30,6 +30,7 @@ from torchvision import datasets, transforms
 from avalanche_plugin.checkpoint_and_BitFlip import CheckpointAndBitFlipPlugin
 from avalanche_plugin.epoch_tracker import EpochTrackerPlugin
 from avalanche_plugin.results import save_avalanche_sequential_results
+from cl.results_layout import group_name
 from avalanche_plugin.utils import (
     create_benchmark,
     create_model,
@@ -98,7 +99,7 @@ def run_sequential(
     cfg = cfg or TrainConfig()
     set_seed(seed=seed)
     if output_dir is None:
-        output_dir = cfg.output_root / (
+        output_dir = cfg.output_root / group_name(name) / (
             f"cifar100_avalanche_{name}_{initialization}_{cfg.model_name}_"
             f"seed{seed}_{datetime.now():%Y%m%d_%H%M%S}{suffix}"
         )
@@ -232,8 +233,10 @@ def run_three_seeds(
     Un seed che ha già risultati non viene rieseguito, a meno di overwrite=True.
     """
     cfg = cfg or TrainConfig()
+    if isinstance(seeds, int):  # accetta anche un singolo seed (es. SEEDS = 42)
+        seeds = [seeds]
     seeds = list(cfg.seeds if seeds is None else seeds)
-    aggregate_dir = cfg.output_root / (
+    aggregate_dir = cfg.output_root / group_name(name) / (
         f"cifar100_avalanche_{name}_{initialization}_{cfg.model_name}_3seeds{suffix}"
     )
     done = [s for s in seeds if (aggregate_dir / f"seed{s}" / "results.json").exists()]

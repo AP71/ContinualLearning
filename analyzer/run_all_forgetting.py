@@ -1,6 +1,6 @@
 """Run the layer-wise forgetting analysis on every sequential experiment in results.
 
-Scans ``cl/results`` for experiment folders that contain all seed directories
+Scans ``cl/results/<group>/`` for experiment folders that contain all seed directories
 (``seed42``, ``seed2023``, ``seed3047``) with their ``checkpoints``. JOINT runs
 are skipped (no sequential checkpoints to compare). For each remaining folder
 the analysis runs only if ``forgetting.json`` is missing; plots are then
@@ -18,8 +18,9 @@ import traceback
 from pathlib import Path
 
 ANALYZER_DIR = Path(__file__).resolve().parent
-if str(ANALYZER_DIR) not in sys.path:
-    sys.path.insert(0, str(ANALYZER_DIR))
+for _path in (ANALYZER_DIR, ANALYZER_DIR.parent):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
 
 from forgetting_analysis import (  # noqa: E402
     DEFAULT_DATASET_PATH,
@@ -29,8 +30,9 @@ from forgetting_analysis import (  # noqa: E402
     analyze_forgetting,
     plot_forgetting_results,
 )
+from cl.results_layout import RESULTS_ROOT, experiment_dirs  # noqa: E402
 
-RESULTS_DIR = ROOT / "cl" / "results"
+RESULTS_DIR = RESULTS_ROOT
 DATASET_PATH = DEFAULT_DATASET_PATH
 BATCH_SIZE = 256
 NUM_WORKERS = 0
@@ -60,9 +62,8 @@ def find_experiments(results_dir: Path = RESULTS_DIR) -> list[Path]:
     """Sequential experiment folders with complete checkpoints, JOINT excluded."""
     return sorted(
         path
-        for path in results_dir.iterdir()
-        if path.is_dir()
-        and "joint" not in path.name.lower()
+        for path in experiment_dirs(results_dir)  # cl/results/<gruppo>/<esperimento>
+        if "joint" not in path.name.lower()
         and _has_sequential_checkpoints(path)
     )
 
@@ -78,7 +79,7 @@ def main() -> None:
     for experiment in experiments:
         json_path = experiment / "forgetting.json"
         if json_path.is_file() and not (REANALYZE_OUTDATED and _is_outdated(json_path)):
-            print(f"[skip] {experiment.name}: forgetting.json already present")
+            print(f"[skip] {experiment.parent.name}/{experiment.name}: forgetting.json already present")
             skipped.append(experiment.name)
             continue
 

@@ -17,7 +17,7 @@ The classifier is restored in three variants, to separate the two CIL effects:
   (interference of the new classes, i.e. task confusion).
 
 Example:
-    python cl/forgetting_analysis.py cl/results/cifar100_avalanche_naive_checkpoint_resneta_3seeds
+    python cl/forgetting_analysis.py cl/results/naive/cifar100_avalanche_naive_checkpoint_resneta_3seeds
 """
 
 from __future__ import annotations
@@ -607,7 +607,7 @@ def _network_order(
     return ordered
 
 
-EXPERIMENTS_DIR = ROOT / "cl" / "results" / "cifar100_avalanche_naive_checkpoint_resneta_3seeds"
+EXPERIMENTS_DIR = ROOT / "cl" / "results" / "naive" / "cifar100_avalanche_naive_checkpoint_resneta_3seeds"
 DATASET_PATH = DEFAULT_DATASET_PATH
 OUTPUT_PATH: Path | None = None
 BATCH_SIZE = 256

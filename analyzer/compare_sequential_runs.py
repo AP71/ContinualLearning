@@ -16,9 +16,18 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from analyzer.analyze_results import _statistics
+from cl.results_layout import RESULTS_ROOT, experiment_dirs, results_dir
 
+# True: per ogni metodo (cartella di cl/results) solo la run con la Class-IL finale
+# piu' alta; False: tutte le run.
+BEST_RUN_PER_METHOD = True
 
-RESULTS_ROOT = ROOT / "cl" / "results"
+# Riferimenti Class-IL (linee orizzontali tratteggiate): (etichetta, cartella, estrattore, stile)
+_REFERENCE_STYLES = {
+    "JOINT": {"color": "black", "linestyle": "--"},
+    "Linear probe": {"color": "#555555", "linestyle": "-."},
+}
+_SLDA_STYLE = {"color": "#777777", "linestyle": "--", "marker": "x", "linewidth": 1.8, "markersize": 6}
 
 
 _COLORS = [
@@ -96,17 +105,15 @@ def _is_sequential_result(results_path: Path) -> bool:
     return True
 
 
-def _load_top_level_sequential_results() -> list[tuple[str, dict[str, Any]]]:
-    results: list[tuple[str, dict[str, Any]]] = []
+def _load_top_level_sequential_results() -> list[tuple[str, dict[str, Any], str]]:
+    """(nome cartella, results.json, gruppo/metodo) di ogni run sequenziale."""
+    results: list[tuple[str, dict[str, Any], str]] = []
     if not RESULTS_ROOT.exists():
         return results
-    for folder in sorted(RESULTS_ROOT.iterdir()):
-        if not folder.is_dir():
-            continue
+    # cl/results/<gruppo>/<esperimento>/results.json
+    for folder in experiment_dirs(RESULTS_ROOT):
         results_json = folder / "results.json"
         if not results_json.is_file():
-            continue
-        if results_json.parent.parent != RESULTS_ROOT:
             continue
         if not _is_sequential_result(results_json):
             continue
@@ -114,8 +121,75 @@ def _load_top_level_sequential_results() -> list[tuple[str, dict[str, Any]]]:
             payload = json.loads(results_json.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        results.append((folder.name, payload))
+        results.append((folder.name, payload, folder.parent.name))
     return results
+
+
+def _final_class_incremental(series: dict[str, Any]) -> float:
+    """Class-IL (%) a fine sequenza, media dei seed; -inf se manca."""
+    curve = series.get("accuracy_vs_classes")
+    if curve is None:
+        return float("-inf")
+    return float(np.asarray(curve[1], dtype=float)[-1])
+
+
+def _best_run_per_method(
+    runs: list[tuple[str, dict[str, Any], str]],
+) -> list[tuple[str, dict[str, Any], str]]:
+    """Per ogni gruppo tiene la run con la Class-IL finale piu' alta."""
+    best: dict[str, tuple[float, tuple[str, dict[str, Any], str]]] = {}
+    for run in runs:
+        score = _final_class_incremental(_series_from_experiment(run[1]))
+        if score == float("-inf"):  # nessuna curva Class-IL (es. linear probe)
+            continue
+        if run[2] not in best or score > best[run[2]][0]:
+            best[run[2]] = (score, run)
+    print("Miglior run per metodo (Class-IL finale):")
+    for group, (score, run) in sorted(best.items()):
+        print(f"  {group:15s} {score:6.2f}%  {run[0]}")
+    return [run for _, run in best.values()]
+
+
+def _read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _load_reference_lines() -> dict[str, float]:
+    """Accuratezza finale (%) di JOINT e linear probe, se i risultati esistono."""
+    references: dict[str, float] = {}
+
+    joint = _read_json(results_dir("JOINT") / "cifar100_avalanche_JOINT_checkpoint_resneta_3seeds" / "results.json")
+    if joint and isinstance(joint.get("seeds"), dict):
+        values = [
+            float(seed["final_accuracy_percent"])
+            for seed in joint["seeds"].values()
+            if isinstance(seed, dict) and "final_accuracy_percent" in seed
+        ]
+        if values:
+            references["JOINT"] = float(np.mean(values))
+
+    probe = _read_json(results_dir("linear_probe") / "cifar100_linear_probe_checkpoint_resneta_3seeds" / "results.json")
+    if probe:
+        value = probe.get("test_accuracy_at_best_val_percent", {}).get("mean")
+        if value is not None:
+            references["Linear probe"] = float(value)
+
+    return references
+
+
+def _load_slda_curve() -> tuple[np.ndarray, np.ndarray] | None:
+    """Curva Class-IL dello SLDA sul backbone congelato (media dei seed), se esiste."""
+    heads = _read_json(results_dir("statistical_heads") / "cifar100_statistical_heads_resneta_3seeds" / "results.json")
+    if not heads:
+        return None
+    y = heads.get("heads", {}).get("slda", {}).get("accuracy_vs_classes_percent")
+    if not isinstance(y, list) or not y:
+        return None
+    y_arr = np.asarray(y, dtype=float)
+    return 10.0 * np.arange(1, len(y_arr) + 1), y_arr
 
 
 def _mean_across_runs(values: list[Any]) -> np.ndarray:
@@ -205,6 +279,8 @@ def _save_comparison_plot(
     ylabel: str,
     y_formatter: Any | None = None,
     x_values: Any | None = None,
+    reference_lines: dict[str, float] | None = None,
+    slda_curve: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> None:
     fig, axis = plt.subplots(figsize=(10, 6))
     for idx, (experiment_name, series) in enumerate(sorted(series_by_experiment.items())):
@@ -218,15 +294,35 @@ def _save_comparison_plot(
             x = np.arange(1, len(y) + 1) if x_values is None else x_values
             axis.plot(x, y, marker=marker, linewidth=2, markersize=6, color=color, label=experiment_name)
 
+    if slda_curve is not None:
+        x, y = slda_curve
+        axis.plot(x, y, label=f"SLDA, no buffer ({y[-1]:.1f}%)", **_SLDA_STYLE)
+
+    for name, value in (reference_lines or {}).items():
+        style = _REFERENCE_STYLES.get(name, {"color": "gray", "linestyle": "--"})
+        axis.axhline(value, linewidth=1.5, label=f"{name} ({value:.1f}%)", **style)
+
     axis.set_title(title, fontsize=14)
     axis.set_xlabel(xlabel, fontsize=11)
     axis.set_ylabel(ylabel, fontsize=11)
     axis.grid(True, alpha=0.35)
-    axis.legend(title="Run", loc="best", frameon=True)
+    handles, labels = axis.get_legend_handles_labels()
+    # Legenda sotto l'asse x, su tutta la larghezza, piu' voci per riga
+    axis.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.0, -0.12, 1.0, 0.0),
+        mode="expand",
+        ncol=min(4, max(1, len(labels))),
+        frameon=False,
+        fontsize=9,
+        borderaxespad=0.0,
+    )
     if y_formatter is not None:
         axis.yaxis.set_major_formatter(y_formatter)
     fig.tight_layout()
-    fig.savefig(output_path, dpi=300)
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -237,10 +333,12 @@ def generate_comparison_plots(output_dir: Path | None = None) -> list[Path]:
     sequential_results = _load_top_level_sequential_results()
     if not sequential_results:
         raise FileNotFoundError("No sequential experiment results were found under cl/results.")
+    if BEST_RUN_PER_METHOD:
+        sequential_results = _best_run_per_method(sequential_results)
 
     all_series_by_experiment: dict[str, dict[str, np.ndarray]] = {}
     bitflip_series_by_experiment: dict[str, dict[str, np.ndarray]] = {}
-    for folder_name, payload in sequential_results:
+    for folder_name, payload, _group in sequential_results:
         label = _clean_experiment_name(folder_name)
         series = _series_from_experiment(payload)
         if not series:
@@ -262,6 +360,8 @@ def generate_comparison_plots(output_dir: Path | None = None) -> list[Path]:
         title="",
         xlabel="Number of seen classes",
         ylabel="Accuracy (%)",
+        reference_lines=_load_reference_lines(),
+        slda_curve=_load_slda_curve(),
     )
     generated.append(acc_path_png)
 

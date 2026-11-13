@@ -28,8 +28,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from utils.checkpoint_analysis import compare_checkpoints  # noqa: E402
+from cl.results_layout import RESULTS_ROOT, experiment_dirs  # noqa: E402
 
-RESULTS_DIR = ROOT / "cl" / "results"
+RESULTS_DIR = RESULTS_ROOT
 METHOD = "sws"
 
 
@@ -130,8 +131,8 @@ def main() -> None:
     args = parser.parse_args()
 
     experiments = sorted(
-        p for p in RESULTS_DIR.iterdir()
-        if p.is_dir() and (not args.filters or any(f.lower() in p.name.lower() for f in args.filters))
+        (p for p in experiment_dirs(RESULTS_DIR)  # cl/results/<gruppo>/<esperimento>
+         if not args.filters or any(f.lower() in p.name.lower() for f in args.filters))
     )
     for exp in experiments:
         print(f"[{exp.name}]")

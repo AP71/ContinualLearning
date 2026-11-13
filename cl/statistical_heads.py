@@ -18,7 +18,7 @@ Simplifications w.r.t. FeCAM (Goswami et al., 2023): per-class shrinkage
 Sigma_c + gamma * mean(diag(Sigma_c)) * I; optional sign-preserving power
 transform instead of Tukey's transform (ReActNet features can be negative).
 
-Results go to ``cl/results/statistical_heads/``.
+Results go to ``cl/results/Linear/``.
 
 Example:
     python cl/statistical_heads.py
@@ -43,12 +43,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from avalanche_plugin.utils import create_model, set_seed  # noqa: E402
+from cl.results_layout import results_dir  # noqa: E402
 
 DATASET_PATH = Path(r"F:/Dataset/CIFAR-100/")
-EXPERIMENT_DIR = ROOT / "cl" / "results" / "cifar100_avalanche_FreezingHead_checkpoint_resneta_3seeds"
+EXPERIMENT_DIR = results_dir("FreezingHead") / "cifar100_avalanche_FreezingHead_checkpoint_resneta_3seeds"
 CHECKPOINT_NAME = "after_task_10.h5"
 MODEL_NAME = "resneta"
-OUTPUT_ROOT = ROOT / "cl" / "results" / "statistical_heads"
+OUTPUT_ROOT = results_dir("statistical_heads")  # cl/results/Linear
 BATCH_SIZE = 256
 WORKERS = 0
 SEEDS = (42, 2023, 3047)

@@ -45,7 +45,9 @@ from avalanche_plugin.checkpoint_and_BitFlip import CheckpointAndBitFlipPlugin
 DATASET_PATH = Path(r"F:/Dataset/CIFAR-100/")
 CHECKPOINT_PATH: Path | None = None
 MODEL_NAME = "resneta"
-OUTPUT_ROOT = ROOT / "cl" / "results"
+from cl.results_layout import results_dir  # noqa: E402
+
+OUTPUT_ROOT = results_dir("JOINT")  # cl/results/JOINT
 BATCH_SIZE = 256
 WORKERS = 0
 

@@ -30,6 +30,16 @@ every task from task 2 (both off by default, they can be combined):
 - ``weight_aligning=True``: Weight Aligning (Zhao et al., 2020), the rows of ``fc`` of the
   new classes are rescaled so that their mean norm equals that of the old classes.
 If both are on, fine-tuning runs first and Weight Aligning is applied afterwards.
+
+Optional statistical head (``slda_head=True``): at the end of every task ``fc`` is
+rewritten as an LDA classifier (class means + shared covariance, see
+avalanche_plugin/adapt_then_slda.py) computed on the features of the *current* upper
+blocks: new classes use the latents of all the current-task samples, old classes the
+latents in the buffer, so the statistics are recomputed exactly after every update of
+the upper blocks (no drift approximation) and the head has no bias toward the newest
+task by construction. The ``fc`` trained with the loss is saved before being
+overwritten and restored at the start of the next task (it is only needed to train the
+upper blocks); evaluation and checkpoints use the LDA head.
 """
 
 from __future__ import annotations
@@ -41,6 +51,8 @@ import torch.nn.functional as F
 from avalanche.core import SupervisedPlugin
 from torch import nn
 from torch.utils.data import DataLoader
+
+from avalanche_plugin.adapt_then_slda import StreamingLDA, restore_head, save_head
 
 IMAGE_REPLAY_BYTES = 2000 * 3 * 32 * 32  # memory of the image Replay with mem_size=2000
 
@@ -64,6 +76,8 @@ class BinaryLatentReplayPlugin(SupervisedPlugin):
         weight_aligning: bool = False,
         balanced_ft_epochs: int = 0,
         balanced_ft_lr: float = 1e-4,
+        slda_head: bool = False,
+        slda_shrinkage: float = 1e-2,
     ):
         super().__init__()
         if latent_bits not in (1, 32):
@@ -76,6 +90,9 @@ class BinaryLatentReplayPlugin(SupervisedPlugin):
         self.weight_aligning = weight_aligning
         self.balanced_ft_epochs = balanced_ft_epochs
         self.balanced_ft_lr = balanced_ft_lr
+        self.slda_head = slda_head
+        self.slda_shrinkage = slda_shrinkage
+        self._train_head: dict[str, torch.Tensor] | None = None  # fc trained with the loss
 
         self.scale: torch.Tensor | None = None  # per-channel scale of the bottleneck
         self.capacity: int | None = None  # number of latents that fit the budget
@@ -147,6 +164,8 @@ class BinaryLatentReplayPlugin(SupervisedPlugin):
     def before_training_exp(self, strategy, *args, **kwargs):
         if self.capacity is None:
             self._setup(strategy)
+        if self._train_head is not None:  # fc back to the trained head, not the LDA one
+            restore_head(getattr(strategy.model, self.classifier_name), self._train_head)
 
     # ------------------------------------------------------------------ replay loss
     def before_backward(self, strategy, *args, **kwargs):
@@ -200,18 +219,46 @@ class BinaryLatentReplayPlugin(SupervisedPlugin):
                 self._balanced_finetune(strategy)
             if self.weight_aligning:
                 self._weight_align(strategy, old_classes, new_classes)
+        if self.slda_head:
+            self._write_slda_head(strategy, new_x, new_y, old_classes)
 
     # ------------------------------------------------------------------ head corrections
     @torch.no_grad()
-    def _pooled_buffer_features(self, model: nn.Module, device: torch.device, batch_size: int):
-        """Input of ``fc`` for every buffer latent (upper blocks fixed during fine-tuning)."""
+    def _pooled_features(self, model: nn.Module, stored: torch.Tensor, device: torch.device, batch_size: int):
+        """Input of ``fc`` for stored latents, through the current upper blocks."""
         feats = []
-        for start in range(0, len(self.buffer_y), batch_size):
-            h = self._decode(self.buffer_x[start:start + batch_size], device)
+        for start in range(0, len(stored), batch_size):
+            h = self._decode(stored[start:start + batch_size], device)
             for block in model.feature[self.cut_block:]:
                 h = block(h)
             feats.append(model.pool1(h).flatten(1))
         return torch.cat(feats)
+
+    def _pooled_buffer_features(self, model: nn.Module, device: torch.device, batch_size: int):
+        """Input of ``fc`` for every buffer latent (upper blocks fixed during fine-tuning)."""
+        return self._pooled_features(model, self.buffer_x, device, batch_size)
+
+    @torch.no_grad()
+    def _write_slda_head(self, strategy, new_x: torch.Tensor, new_y: torch.Tensor, old_classes: list[int]) -> None:
+        model = strategy.model
+        device = strategy.device
+        head = getattr(model, self.classifier_name)
+        self._train_head = save_head(head)
+        was_training = model.training
+        model.eval()
+        lda = StreamingLDA()  # recomputed from scratch: the upper blocks have changed
+        lda.update(self._pooled_features(model, new_x, device, strategy.train_mb_size), new_y)
+        if old_classes:
+            old = torch.isin(self.buffer_y, torch.tensor(old_classes))
+            lda.update(
+                self._pooled_features(model, self.buffer_x[old], device, strategy.train_mb_size),
+                self.buffer_y[old],
+            )
+        n_total = lda.write(head, self.slda_shrinkage)
+        if was_training:
+            model.train()
+        print(f"[BinaryLatentReplay] SLDA head: {len(lda.means)} classes, {n_total} latents "
+              f"({len(new_y)} current + {n_total - len(new_y)} buffer), gamma={self.slda_shrinkage:g}")
 
     def _balanced_finetune(self, strategy) -> None:
         model = strategy.model
