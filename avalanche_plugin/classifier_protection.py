@@ -20,6 +20,7 @@ class ClassifierProtectionPlugin(SupervisedPlugin):
     - non_binary_lr_scale: dal secondo task il passo dei parametri reali del backbone
       (gain, bias, RPReLU, primo layer) è moltiplicato per questo fattore.
       I pesi binari e 'fc' non sono toccati.
+    - skip_prefixes: parametri con questi prefissi (es. "engram") restano fuori da questo freno.
     """
 
     def __init__(
@@ -30,6 +31,7 @@ class ClassifierProtectionPlugin(SupervisedPlugin):
         normalize_classifier: bool = True,
         reset_fc_moments: bool = True,
         non_binary_lr_scale: float = 1.0,
+        skip_prefixes: tuple[str, ...] = (),
     ):
         super().__init__()
         self.classifier_name = classifier_name
@@ -38,6 +40,7 @@ class ClassifierProtectionPlugin(SupervisedPlugin):
         self.normalize_classifier = normalize_classifier
         self.reset_fc_moments = reset_fc_moments
         self.non_binary_lr_scale = non_binary_lr_scale
+        self.skip_prefixes = tuple(skip_prefixes)
 
         self.seen_classes: set[int] = set()
         self.curr_classes: set[int] = set()
@@ -65,6 +68,8 @@ class ClassifierProtectionPlugin(SupervisedPlugin):
                         self.non_binary_backbone_names.add(full_name)
 
         for name, _ in model.named_parameters():
+            if name.startswith(self.skip_prefixes):
+                continue
             if name not in self.binary_weight_names and self.classifier_name not in name:
                 self.non_binary_backbone_names.add(name)
 

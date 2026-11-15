@@ -15,8 +15,10 @@ RESULTS_ROOT = ROOT / "cl" / "results"
 
 METHOD_GROUPS = {
     "AdaptThenSLDA": "ATSLDA",
+    "AdapterEnsemble": "AdapterEnsemble",
     "BinaryLatentReplay": "BLR",
     "BinaryLatentReplaySLDA": "BLR_SLDA",
+    "CWRStar": "CWR",
     "EWC": "EWC",
     "Freezing": "Freezing",
     "FreezingHead": "Freezing",

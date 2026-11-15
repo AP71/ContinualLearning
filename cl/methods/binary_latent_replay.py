@@ -14,7 +14,7 @@ from avalanche_plugin.binary_latent_replay import (
 )
 from cl.avalanche_trainer_methods import adam, run_method
 
-SEEDS = [42]  # None = tutti (42, 2023, 3047); es. [42], poi [2023, 3047] per completare
+SEEDS = [2023, 3047]  # None = tutti (42, 2023, 3047); es. [42], poi [2023, 3047] per completare
 
 CUT_BLOCK = 6  # 14 -> 1024x2x2 = 512 B per latente a 1 bit (solo fc addestrabile); 12 -> 512x4x4 = 1 KB
 LATENT_BITS = 1  # 1 = latenti binari, 32 = latenti float (ablazione)

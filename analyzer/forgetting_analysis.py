@@ -43,6 +43,20 @@ if str(ROOT) not in sys.path:
 
 from Network.ReActNet_A_Qaw import Reactnet
 
+
+def _build_model(state: dict[str, torch.Tensor], device: torch.device) -> nn.Module:
+    """Reactnet con la testa che corrisponde al checkpoint.
+
+    AdaptThenSLDA con HEAD="ranpac" sostituisce 'fc' con RanPACHead (buffer 'readout' e,
+    con la proiezione casuale, 'proj'): va ricreata prima di caricare lo state_dict.
+    """
+    model = Reactnet(num_classes=100, imagenet=False)
+    if "fc.readout" in state:
+        from avalanche_plugin.adapt_then_slda import RanPACHead
+
+        model.fc = RanPACHead(model.fc, state.get("fc.proj"), state["fc.readout"])
+    return model.to(device)
+
 SEED_NAMES = ("seed42", "seed2023", "seed3047")
 NUM_TASKS = 10
 CLASSES_PER_TASK = 10
@@ -243,7 +257,12 @@ def _restore_classifier_rows(
         if not name.startswith("fc.") or name not in previous:
             continue
         tensor = current[name]
-        if tensor.dim() >= 1 and tensor.shape[0] == num_classes:
+        if name == "fc.proj":  # proiezione casuale RanPAC: fissa, non per classe
+            continue
+        if name == "fc.readout":  # readout RanPAC: una colonna per classe
+            restored[name][:, rows] = previous[name][:, rows].clone()
+            touched = True
+        elif tensor.dim() >= 1 and tensor.shape[0] == num_classes:
             restored[name][rows] = previous[name][rows].clone()
             touched = True
     if not touched:
@@ -372,7 +391,7 @@ def analyze_forgetting(
             elif current_layers != layer_names:
                 raise ValueError("Binary layer names differ between checkpoints.")
 
-            model = Reactnet(num_classes=100, imagenet=False).to(device)
+            model = _build_model(current, device)
             model.load_state_dict(current, strict=True)
             old_task_ids = range(task_id - 1)
             task_key = str(task_id)
@@ -607,7 +626,7 @@ def _network_order(
     return ordered
 
 
-EXPERIMENTS_DIR = ROOT / "cl" / "results" / "naive" / "cifar100_avalanche_naive_checkpoint_resneta_3seeds"
+EXPERIMENTS_DIR = ROOT / "cl" / "results" / "ATSLDA" / "cifar100_avalanche_AdaptThenSLDA_checkpoint_resneta_3seeds_a1_from10_ranpac20000"
 DATASET_PATH = DEFAULT_DATASET_PATH
 OUTPUT_PATH: Path | None = None
 BATCH_SIZE = 256
@@ -621,4 +640,4 @@ if __name__ == "__main__":
         batch_size=BATCH_SIZE,
         num_workers=NUM_WORKERS,
     )
-    plot_forgetting_results(EXPERIMENTS_DIR / "forgetting.json")
+    plot_forgetting_results(EXPERIMENTS_DIR / "forgetting.json")
