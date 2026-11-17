@@ -21,8 +21,8 @@ from cl.avalanche_trainer_methods import adam, run_method
 SEEDS = [2023, 3047] # None = tutti (42, 2023, 3047); es. [42], poi [2023, 3047] per completare
 
 CLASSIFIER = "fc"
-ADAPT_FROM_BLOCK = 10  # 0 = il task 1 adatta tutta la rete; es. 10 = solo feature[10:] + fc
-ZERO_MEAN = False  # True = CWR+/CWR* (tw - media(tw)); False = CWR semplice
+ADAPT_FROM_BLOCK = 12  # 0 = il task 1 adatta tutta la rete; es. 10 = solo feature[10:] + fc
+ZERO_MEAN = True  # True = CWR+/CWR* (tw - media(tw)); False = CWR semplice
 
 SUFFIX = (f"_from{ADAPT_FROM_BLOCK}" if ADAPT_FROM_BLOCK else "") + ("" if ZERO_MEAN else "_nozm")
 

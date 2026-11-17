@@ -1,7 +1,8 @@
 """Run the layer-wise forgetting analysis on every sequential experiment in results.
 
-Scans ``cl/results/<group>/`` for experiment folders that contain all seed directories
-(``seed42``, ``seed2023``, ``seed3047``) with their ``checkpoints``. JOINT runs
+Scans ``cl/results/<group>/`` for experiment folders that contain all three seed directories
+(``seed42``, ``seed2023``, ``seed3047``) with their complete ``checkpoints``. Folders with
+fewer seeds are reported (with the missing ones) and not analyzed. JOINT runs
 are skipped (no sequential checkpoints to compare). For each remaining folder
 the analysis runs only if ``forgetting.json`` is missing; plots are then
 regenerated (CIL_* and TIL_*).
@@ -41,13 +42,14 @@ NUM_WORKERS = 0
 REANALYZE_OUTDATED = True
 
 
-def _has_sequential_checkpoints(experiment_dir: Path) -> bool:
+def _missing_seeds(experiment_dir: Path) -> list[str]:
+    """Seeds without the full set of per-task checkpoints (empty list = all 3 seeds present)."""
+    missing = []
     for seed in SEED_NAMES:
         checkpoints = experiment_dir / seed / "checkpoints"
-        for task_id in range(1, NUM_TASKS + 1):
-            if not (checkpoints / f"after_task_{task_id:02d}.h5").is_file():
-                return False
-    return True
+        if not all((checkpoints / f"after_task_{t:02d}.h5").is_file() for t in range(1, NUM_TASKS + 1)):
+            missing.append(seed)
+    return missing
 
 
 def _is_outdated(json_path: Path) -> bool:
@@ -58,22 +60,28 @@ def _is_outdated(json_path: Path) -> bool:
     return int(payload.get("schema_version", 1)) < 3  # < 3: pre-SWS restore
 
 
-def find_experiments(results_dir: Path = RESULTS_DIR) -> list[Path]:
-    """Sequential experiment folders with complete checkpoints, JOINT excluded."""
-    return sorted(
-        path
-        for path in experiment_dirs(results_dir)  # cl/results/<gruppo>/<esperimento>
-        if "joint" not in path.name.lower()
-        and _has_sequential_checkpoints(path)
-    )
+def find_experiments(results_dir: Path = RESULTS_DIR) -> tuple[list[Path], dict[Path, list[str]]]:
+    """(experiments with all 3 seeds, {incomplete experiment: missing seeds}); JOINT excluded."""
+    complete, incomplete = [], {}
+    for path in experiment_dirs(results_dir):  # cl/results/<gruppo>/<esperimento>
+        if "joint" in path.name.lower():
+            continue
+        missing = _missing_seeds(path)
+        if missing:
+            incomplete[path] = missing
+        else:
+            complete.append(path)
+    return sorted(complete), incomplete
 
 
 def main() -> None:
     if not RESULTS_DIR.is_dir():
         raise FileNotFoundError(f"Results directory not found: {RESULTS_DIR}")
 
-    experiments = find_experiments()
-    print(f"Found {len(experiments)} sequential experiments in {RESULTS_DIR}")
+    experiments, incomplete = find_experiments()
+    print(f"Found {len(experiments)} sequential experiments with 3 seeds in {RESULTS_DIR}")
+    for path, missing in incomplete.items():
+        print(f"[skip incomplete] {path.parent.name}/{path.name}: missing {', '.join(missing)}")
 
     done, skipped, failed = [], [], []
     for experiment in experiments:
@@ -102,7 +110,7 @@ def main() -> None:
             failed.append(experiment.name)
 
     print("\n================ Summary ================")
-    print(f"Analyzed: {len(done)}  Skipped: {len(skipped)}  Failed: {len(failed)}")
+    print(f"Analyzed: {len(done)}  Skipped: {len(skipped)}  Incomplete: {len(incomplete)}  Failed: {len(failed)}")
     for name in failed:
         print(f"  failed: {name}")
 

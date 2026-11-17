@@ -8,6 +8,16 @@ f_meta = 1 - tanh^2(meta * |W_h|). Gli altri parametri si aggiornano con Adam st
 Adattamento ad A&B-BNN: la binarizzazione avviene dopo la Scaled Weight
 Standardization, quindi il bit è sign(W - mean_filtro). W_b e |W_h| sono calcolati
 su W - mean_filtro invece che su W.
+
+Due opzioni (spente di default: senza, l'ottimizzatore è identico a prima), usate dalla v4:
+- standardized: f_meta usa z = (W - mean_filtro) / std_filtro al posto di |W - mean_filtro|.
+  Il forward vede solo z, quindi z è la distanza dal flip nelle unità della rete e non
+  dipende dalla scala dei pesi latenti.
+- renorm: dopo ogni passo ogni filtro binario viene riportato alla norma ||W - mean_filtro||
+  che aveva al primo passo. L'uscita della rete non cambia (il forward è invariante alla
+  scala del filtro); cambia la plasticità, che non cala più con la crescita della norma.
+  Nei run v3 la norma raddoppiava in 10 task (analyzer/latent_norms.py): quel rallentamento
+  è globale, non selettivo, e si sommava alla saturazione di f_meta.
 """
 from __future__ import annotations
 
@@ -39,11 +49,17 @@ class AdamMeta(torch.optim.Optimizer):
         eps: float = 1e-8,
         weight_decay: float = 0.0,
         meta: float = 1.5,
+        standardized: bool = False,
+        renorm: bool = False,
+        std_eps: float = 1e-5,
     ):
         defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay, meta=meta)
         super().__init__(params, defaults)
         # Identificati per oggetto: robusto ai riordinamenti dei param_groups fatti da Avalanche
         self._binary_ids = {id(p) for p in binary_params}
+        self.standardized = standardized
+        self.renorm = renorm
+        self.std_eps = std_eps  # stesso eps della standardizzazione in HardBinaryScaledStdConv2d
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -69,6 +85,12 @@ class AdamMeta(torch.optim.Optimizer):
                 exp_avg, exp_avg_sq = state["exp_avg"], state["exp_avg_sq"]
                 state["step"] += 1
 
+                is_binary = id(p) in self._binary_ids
+                dims = tuple(range(1, p.ndim))
+                if self.renorm and is_binary and "filter_norm" not in state:
+                    centered = p - p.mean(dim=dims, keepdim=True)
+                    state["filter_norm"] = centered.pow(2).sum(dim=dims, keepdim=True).sqrt()
+
                 exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
                 exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
                 # Stessa formula di torch.optim.Adam (usato dalle baseline): con meta=0
@@ -78,14 +100,24 @@ class AdamMeta(torch.optim.Optimizer):
                 denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(group["eps"])
                 step_size = group["lr"] / bias_correction1
 
-                if id(p) in self._binary_ids and group["meta"] > 0:
-                    centered = p - p.mean(dim=tuple(range(1, p.ndim)), keepdim=True)
+                if is_binary and group["meta"] > 0:
+                    centered = p - p.mean(dim=dims, keepdim=True)
                     toward_flip = torch.sign(centered) * exp_avg > 0
-                    f_meta = 1.0 - torch.tanh(group["meta"] * centered.abs()) ** 2
+                    distance = centered.abs()
+                    if self.standardized:
+                        std = centered.pow(2).mean(dim=dims, keepdim=True).sqrt()
+                        distance = distance / (std + self.std_eps)
+                    f_meta = 1.0 - torch.tanh(group["meta"] * distance) ** 2
                     update = torch.where(toward_flip, f_meta * exp_avg, exp_avg)
                 else:
                     update = exp_avg
 
                 p.addcdiv_(update, denom, value=-step_size)
+
+                if self.renorm and is_binary:
+                    mean = p.mean(dim=dims, keepdim=True)
+                    centered = p - mean
+                    norm = centered.pow(2).sum(dim=dims, keepdim=True).sqrt().clamp_min(1e-12)
+                    p.copy_(mean + centered * (state["filter_norm"] / norm))
 
         return loss

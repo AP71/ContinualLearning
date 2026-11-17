@@ -7,3 +7,4 @@ inference/models/
 *.png
 *.json
 *.txt
+__pycache__/

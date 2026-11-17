@@ -21,6 +21,10 @@ class CheckpointAndBitFlipPlugin(SupervisedPlugin):
 
     def before_training(self, strategy, **kwargs):
         """Salva lo stato iniziale (initial.h5) prima dell'inizio dello stream."""
+        # Avalanche chiama before_training a ogni strategy.train(exp): senza questa guardia
+        # initial.h5 veniva riscritto prima di ogni task (alla fine = stato dopo il penultimo task)
+        if self.prev_checkpoint is not None:
+            return
         initial_path = self.checkpoint_dir / "initial.h5"
         torch.save(strategy.model.state_dict(), initial_path)
         self.prev_checkpoint = initial_path

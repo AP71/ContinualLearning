@@ -17,7 +17,6 @@ METHOD_GROUPS = {
     "AdaptThenSLDA": "ATSLDA",
     "AdapterEnsemble": "AdapterEnsemble",
     "BinaryLatentReplay": "BLR",
-    "BinaryLatentReplaySLDA": "BLR_SLDA",
     "CWRStar": "CWR",
     "EWC": "EWC",
     "Freezing": "Freezing",
@@ -25,11 +24,10 @@ METHOD_GROUPS = {
     "JOINT": "JOINT",
     "LwF": "LWF",
     "Metaplasticity": "Metaplasticity",
-    "MetaSLDA": "Meta_SLDA",
     "naive": "naive",
     "Replay": "Replay",
     "linear_probe": "Linear",
-    "statistical_heads": "Linear",
+    "statistical_heads": "Linear"
 }
 
 # Cartelle in cl/results che non contengono esperimenti

@@ -20,13 +20,10 @@ def make_config(epochs: int = 40, learning_rate: float = 1e-3, weight_decay: flo
                        weight_decay=weight_decay, lr_milestones=milestones)
 
 
-def apply_loss(common_args: dict, label_smoothing: float = 0.0, mixup_alpha: float = 0.0, tasks: int = 1,
-               force: bool = False) -> TrainLoss | None:
-    """Sostituisce la loss e, con mixup, aggiunge il plugin (solo sui primi ``tasks`` task).
-
-    ``force=True`` installa comunque ``TrainLoss`` (serve per la maschera sulle classi del task).
-    """
-    if not label_smoothing and not mixup_alpha and not force:
+def apply_loss(common_args: dict, label_smoothing: float = 0.0, mixup_alpha: float = 0.0,
+               tasks: int = 1) -> TrainLoss | None:
+    """Sostituisce la loss e, con mixup, aggiunge il plugin (solo sui primi ``tasks`` task)."""
+    if not label_smoothing and not mixup_alpha:
         return None
     loss = TrainLoss(label_smoothing)
     common_args["criterion"] = loss

@@ -8,7 +8,7 @@ from cl.avalanche_trainer_methods import run_method
 
 SEEDS = None  # None = tutti (42, 2023, 3047); es. [42], poi [2023, 3047] per completare
 
-INITIALIZATION = "checkpoint"
+INITIALIZATION = "random"
 
 if __name__ == "__main__":
     run_method("naive", initialization=INITIALIZATION, seeds=SEEDS)

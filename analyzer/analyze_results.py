@@ -337,4 +337,4 @@ def analyze_results(results_path: Path) -> dict[str, Any]:
 
 if __name__ == "__main__":
     analyze_results(Path(
-        r"/cl/results/BLR/cifar100_avalanche_BinaryLatentReplay_checkpoint_resneta_3seeds_14\results.json"))
+        r"F:\TesiMagistrale\ContinualLearning\cl\results\ER_ACE\cifar100_avalanche_ER_ACE_checkpoint_resneta_3seeds_meta_m12\results.json"))
